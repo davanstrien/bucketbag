@@ -59,20 +59,20 @@ class DiskHighWater(threading.Thread):
         super().__init__(daemon=True)
         self.path = path
         self.interval = interval
-        self._stop = threading.Event()
+        self._stopev = threading.Event()  # NOT _stop: that shadows Thread._stop()
         self.base = shutil.disk_usage(path).used
         self.peak = self.base
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stopev.is_set():
             try:
                 self.peak = max(self.peak, shutil.disk_usage(self.path).used)
             except OSError:
                 pass
-            self._stop.wait(self.interval)
+            self._stopev.wait(self.interval)
 
     def stop_mb(self) -> float:
-        self._stop.set()
+        self._stopev.set()
         self.join(timeout=1)
         return max(0.0, (self.peak - self.base) / 1e6)
 
