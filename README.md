@@ -56,6 +56,23 @@ for batch in batched_files(SRC, keys=keys, n=32, prefetch=2):
     write_parquet(rows, OUT, f"part-{batch[0].key.replace('/', '_')}.parquet")
 ```
 
+## Performance
+
+Reading 3,000 real BHL page images (`.jp2`) on a Hugging Face `cpu-upgrade` Job
+(`examples/bench.py`, 0 failures across all methods):
+
+| method | img/s | MB/s | notes |
+| --- | --- | --- | --- |
+| FUSE mount (32 threads) | 13.3 | 8.5 | the thing to avoid |
+| `bucketbag` prefetch=0, n=64 | 54.2 | 34.7 | also *reads* every file's bytes |
+| raw `download_bucket_files` (n=64) | 76.8 | 49.1 | download only (no read) |
+| `HfFileSystem` (32 threads) | 95.2 | 60.9 | signed-URL range reads |
+| **`bucketbag` prefetch=2, n=64** | **101.9** | **65.2** | fastest; disk bounded to ~2 batches |
+
+`prefetch` overlapping downloads with your processing ~doubles throughput and makes `bucketbag` the
+fastest path — **~7.7× faster than a FUSE mount** — while keeping the reliable HfApi transport, bounded
+disk (75 → 125 MB high-water), and flat RSS (161 MB).
+
 ## API
 
 | function | what it does |
