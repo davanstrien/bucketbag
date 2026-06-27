@@ -30,7 +30,7 @@ os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 from huggingface_hub import create_bucket  # noqa: E402
 
-from bucketbag import batched_files, completed_keys, iter_keys, write_parquet  # noqa: E402
+from bucketbag import batched_files, boost, completed_keys, iter_keys, write_parquet  # noqa: E402
 
 SRC = "davanstrien/finebooks-bhl-pilot"
 OUT = "davanstrien/bucketbag-mvp-out"
@@ -67,6 +67,10 @@ def main() -> None:
         scratch = Path("/tmp")
     scratch = scratch / "bucketbag-measure"
     scratch.mkdir(parents=True, exist_ok=True)
+
+    # BHL pages are small (~1 MB), so raise xet's file-download concurrency for ~2.5x throughput.
+    # (No-op-safe; for large files you'd skip this. See bucketbag.boost docstring.)
+    boost(file_concurrency=32)
 
     create_bucket(OUT, exist_ok=True)
 

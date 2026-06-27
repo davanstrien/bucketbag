@@ -36,9 +36,17 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from huggingface_hub import HfApi
-from huggingface_hub._buckets import BucketFile
-from toolz import partition_all
+# Enable xet high-performance mode before huggingface_hub imports (env is read at import time).
+# This is the documented, safe transport boost. The big lever for many-small-files throughput —
+# raising xet's per-process file-download concurrency — is workload-dependent (great for small
+# files, over-subscribes large ones) and import-time-fixed, so it is OPT-IN via boost(), not set
+# silently here. Opt out of even this default with BUCKETBAG_NO_XET_TUNE=1.
+if os.environ.get("BUCKETBAG_NO_XET_TUNE", "").lower() not in ("1", "true", "yes", "on"):
+    os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
+from huggingface_hub import HfApi  # noqa: E402
+from huggingface_hub._buckets import BucketFile  # noqa: E402
+from toolz import partition_all  # noqa: E402
 
 __all__ = [
     "LoadedItem",
@@ -46,6 +54,7 @@ __all__ = [
     "batched_files",
     "completed_keys",
     "write_parquet",
+    "boost",
     "partition_all",
 ]
 
@@ -54,6 +63,29 @@ __version__ = "0.1.0"
 logger = logging.getLogger("bucketbag")
 
 _BUCKET_PREFIX = "hf://buckets/"
+
+
+def boost(*, file_concurrency: int = 32, high_performance: bool = True) -> None:
+    """Raise xet download concurrency for **many-small-files** workloads (e.g. page images).
+
+    Sets xet's per-process concurrent-file-download cap (default 8) higher. On ~1 MB files this
+    roughly **2.5x'd** throughput in our l4x1 benchmark and made the HfApi path beat both raw
+    download and HfFileSystem. Use a **low** value (or don't call this) for **large** files: each
+    file already fans out into ``HF_XET_NUM_CONCURRENT_RANGE_GETS`` (16) internal range GETs, so a
+    high cap means ~``file_concurrency * 16`` connections and that many large files buffering at
+    once — over-subscription and a memory/disk blowup.
+
+    Call this **before your first** :func:`batched_files`/download: xet reads these env vars when
+    its runtime first initializes (on the first download), so a call beforehand is picked up. It
+    does not override env vars you have already exported.
+
+    Note: the file-concurrency vars are not yet documented in ``huggingface_hub`` (best-effort — an
+    unknown var is ignored, never an error); ``HF_XET_HIGH_PERFORMANCE`` is documented.
+    """
+    if high_performance:
+        os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+    os.environ.setdefault("HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
+    os.environ.setdefault("HF_XET_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +302,29 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
+def _pack(
+    remotes: list[BucketFile | str], n: int | None, max_bytes: int | None
+) -> Iterator[list[BucketFile | str]]:
+    """Group files into batches capped by count (``n``) and/or total bytes (``max_bytes``).
+
+    Whichever cap is hit first ends a batch; a single file larger than ``max_bytes`` forms its own
+    batch (files can't be split). Sizes come from ``BucketFile.size``; unknown sizes count as 0.
+    """
+    batch: list[BucketFile | str] = []
+    total = 0
+    for r in remotes:
+        size = getattr(r, "size", 0) or 0
+        full_by_count = n is not None and len(batch) >= n
+        full_by_bytes = max_bytes is not None and bool(batch) and total + size > max_bytes
+        if full_by_count or full_by_bytes:
+            yield batch
+            batch, total = [], 0
+        batch.append(r)
+        total += size
+    if batch:
+        yield batch
+
+
 def batched_files(
     bucket: str,
     *,
@@ -277,9 +332,10 @@ def batched_files(
     prefix: str | None = None,
     include: str | None = None,
     exclude: str | None = None,
-    n: int = 20,
+    n: int | None = 20,
+    max_bytes: int | None = None,
     dir: str | os.PathLike[str] | None = None,
-    prefetch: int = 1,
+    prefetch: int = 2,
     max_workers: int | None = None,
     start_after: str | None = None,
     limit: int | None = None,
@@ -287,10 +343,16 @@ def batched_files(
 ) -> Iterator[list[LoadedItem]]:
     """``partition_all`` for bucket files: download each batch, yield it, delete it.
 
-    Lists the bucket (or uses ``keys=``), then downloads files in batches of ``n`` to ``dir``
-    (default ``/dev/shm`` if available, else the system temp) and yields ``list[LoadedItem]``.
-    Each batch's files are removed before the loop advances, so disk stays bounded — to roughly
-    ``(prefetch + 1) * n`` files at a time. Cleanup is guaranteed even on exception.
+    Lists the bucket (or uses ``keys=``), then downloads files in batches to ``dir`` (default
+    ``/dev/shm`` if available, else the system temp) and yields ``list[LoadedItem]``. Each batch's
+    files are removed before the loop advances, so disk stays bounded. Cleanup is guaranteed even
+    on exception.
+
+    Batch size is capped by **file count** (``n``) and/or **total bytes** (``max_bytes``),
+    whichever is hit first. ``max_bytes`` is the better bound for a predictable footprint when
+    files vary in size — disk high-water is then ≈ ``(prefetch + 1) * max_bytes`` regardless of
+    file type. It needs file sizes, which bucketbag has when it lists for you (or when you pass
+    ``BucketFile`` objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
 
     When the helper lists for you it keeps the ``BucketFile`` objects and passes them to
     ``download_bucket_files``, which skips the per-file metadata fetch. (Passing ``keys=`` as
@@ -301,10 +363,14 @@ def batched_files(
         keys: explicit keys to fetch; if omitted the bucket is listed (``prefix``/``include``/
             ``exclude``/``start_after``/``limit`` apply). Useful for resume: filter out
             :func:`completed_keys` first.
-        n: files per batch.
+        n: max files per batch (``None`` = no count cap; pair with ``max_bytes`` for pure
+            size-based batching).
+        max_bytes: max total bytes per batch. A single file larger than this forms its own batch.
         dir: download directory (RAM tmpfs by default).
         prefetch: how many batches to download ahead of the consumer (``0`` = fully sequential).
-            Overlaps download I/O with your processing; raises disk high-water accordingly.
+            Overlaps download I/O with your processing **and** raises concurrent-download
+            throughput; also raises disk high-water (≈ ``prefetch + 1`` batches in flight). ``1``
+            adds lookahead but no extra download concurrency; use ``>= 2`` to overlap downloads.
         max_workers: thread-pool size for prefetch downloads (defaults to ``prefetch``).
         token: HF token (defaults to the logged-in token).
 
@@ -352,7 +418,13 @@ def batched_files(
             logger.warning("Skipped %d missing file(s) in batch", len(items) - len(present))
         return tmpdir, present
 
-    chunks = [list(c) for c in partition_all(n, remotes)]
+    if max_bytes is not None and not isinstance(remotes[0], BucketFile):
+        logger.warning(
+            "max_bytes ignored: file sizes are unknown for string keys "
+            "(let batched_files list, or pass BucketFile objects as keys)."
+        )
+        max_bytes = None
+    chunks = list(_pack(remotes, n, max_bytes))
 
     if prefetch <= 0:
         for chunk in chunks:
