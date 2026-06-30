@@ -11,6 +11,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exercise the requires-python floor (3.10) and a recent interpreter, so
+        # 3.10-incompatible code can't ship green on whatever uv happens to pick.
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -19,14 +25,17 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python
-        run: uv python install
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
+      # --locked (not --frozen) fails CI if uv.lock has drifted from pyproject.toml.
       - name: Install the project
-        run: uv sync --frozen
+        run: uv sync --locked --python ${{ matrix.python-version }}
 
+      # ruff is a locked dev dependency, so CI runs the pinned version (not whatever
+      # uvx fetches from PyPI), keeping lint stable across releases and contributors.
       - name: Ruff
-        run: uvx ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Pytest
-        run: uv run pytest
+        run: uv run --no-sync pytest

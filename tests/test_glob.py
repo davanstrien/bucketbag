@@ -76,8 +76,16 @@ def test_literal_pattern_matches_only_itself(literal):
     assert not rx.match(literal + "x")
 
 
-@given(st.text(min_size=1, max_size=12, alphabet=_LITERAL))
-def test_glob_prefix_is_prefix_of_input(literal):
-    # With no wildcard, the whole pattern is the literal head, so prefix ⊆ literal.
-    prefix = _glob_prefix(literal)
-    assert literal.startswith(prefix)
+# Path-like literals: 1-4 wildcard-free segments joined by "/", so non-empty prefixes are
+# actually generated (a flat _LITERAL alphabet excludes "/", so it could only ever yield "").
+_LITERAL_SEG = st.text(min_size=1, max_size=6, alphabet=_LITERAL)
+_LITERAL_PATH = st.lists(_LITERAL_SEG, min_size=1, max_size=4).map("/".join)
+
+
+@given(_LITERAL_PATH)
+def test_glob_prefix_is_everything_up_to_last_slash(path):
+    # With no wildcard, the prefix is the literal head up to (and including) the final "/".
+    prefix = _glob_prefix(path)
+    assert path.startswith(prefix)
+    slash = path.rfind("/")
+    assert prefix == (path[: slash + 1] if slash >= 0 else "")
