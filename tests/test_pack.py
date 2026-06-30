@@ -67,8 +67,18 @@ def test_pack_unknown_size_counts_as_zero():
     assert len(list(_pack(items, n=None, max_bytes=1))) == 1  # all zero-size -> one batch
 
 
+def test_pack_n_zero_is_degenerate_leading_empty_batch():
+    # n=0 is a degenerate cap that bucketbag never produces (batched_files defaults n=20 and
+    # never passes 0). _pack does not special-case it: `len(batch) >= 0` is true before the first
+    # append, so a leading empty batch is emitted. Pinned here so the boundary the property tests
+    # below deliberately exclude is still covered, and any future n<=0 handling is a visible diff.
+    items = [bf("a", 1), bf("b", 1)]
+    assert paths(_pack(items, n=0, max_bytes=None)) == [[], ["a"], ["b"]]
+
+
 # --- properties -------------------------------------------------------------
-# sizes of files; n (count cap); max_bytes (byte cap). Both caps optional.
+# sizes of files; n (count cap); max_bytes (byte cap). Both caps optional. The count cap is
+# drawn from {None} ∪ [1, 2000] — the supported domain (n=0 is degenerate, covered above).
 sizes_st = st.lists(
     st.integers(min_value=0, max_value=1000),
     max_size=40,
