@@ -7,8 +7,9 @@ batch-download-process-cleanup loop into one composable verb.
 
 The headline helper is :func:`batched_files` — think ``toolz.partition_all`` for *bucket
 files*, except each batch is downloaded to a temp dir and **deleted before the next** (bounded
-disk), with optional prefetch overlap. It is **file-type agnostic**: a :class:`LoadedItem` is
-just a key + a local path + raw bytes, with opt-in lazy ``.image`` / ``.text()`` / ``.json()``.
+scratch space), with optional prefetch overlap. It is **file-type agnostic**: a
+:class:`LoadedItem` is just a key + a local path + raw bytes, with opt-in lazy ``.image`` /
+``.text()`` / ``.json()``.
 
     from bucketbag import batched_files
 
@@ -44,8 +45,7 @@ from typing import Any
 if os.environ.get("BUCKETBAG_NO_XET_TUNE", "").lower() not in ("1", "true", "yes", "on"):
     os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
-from huggingface_hub import HfApi  # noqa: E402
-from huggingface_hub._buckets import BucketFile  # noqa: E402
+from huggingface_hub import BucketFile, HfApi  # noqa: E402
 from toolz import partition_all  # noqa: E402
 
 __all__ = [
@@ -70,24 +70,23 @@ _BUCKET_PREFIX = "hf://buckets/"
 def boost(*, file_concurrency: int = 32, high_performance: bool = True) -> None:
     """Raise xet download concurrency for **many-small-files** workloads (e.g. page images).
 
-    Sets xet's per-process concurrent-file-download cap (default 8) higher. On ~1 MB files this
-    roughly **2.5x'd** throughput in our l4x1 benchmark and made the HfApi path beat both raw
-    download and HfFileSystem. Use a **low** value (or don't call this) for **large** files: each
-    file already fans out into ``HF_XET_NUM_CONCURRENT_RANGE_GETS`` (16) internal range GETs, so a
-    high cap means ~``file_concurrency * 16`` connections and that many large files buffering at
-    once — over-subscription and a memory/disk blowup.
+    Sets ``HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`` — xet's per-process concurrent-file
+    download cap (default 8) — higher. On ~1 MB files this roughly **2.5x'd** throughput in our
+    l4x1 benchmark and made the HfApi path beat both raw download and HfFileSystem. Use a **low**
+    value (or don't call this) for **large** files: each file's chunk fetches are managed by
+    xet's own connection/concurrency machinery, so many large files in flight at once means that
+    many files buffering concurrently — over-subscription and a memory/disk blowup.
 
     Call this **before your first** :func:`batched_files`/download: xet reads these env vars when
     its runtime first initializes (on the first download), so a call beforehand is picked up. It
     does not override env vars you have already exported.
 
-    Note: the file-concurrency vars are not yet documented in ``huggingface_hub`` (best-effort — an
+    Note: the file-concurrency var is not documented in ``huggingface_hub`` (best-effort — an
     unknown var is ignored, never an error); ``HF_XET_HIGH_PERFORMANCE`` is documented.
     """
     if high_performance:
         os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
     os.environ.setdefault("HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
-    os.environ.setdefault("HF_XET_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +206,13 @@ class LoadedItem:
 
     @property
     def image(self):
-        """Lazily open the file as a ``PIL.Image`` (raises if the bytes aren't an image)."""
+        """Lazily open the file as a ``PIL.Image`` (raises if the bytes aren't an image).
+
+        Each access re-opens the file, and ``Image.open`` is itself lazy — **decode (or
+        ``.load()``) within the batch**, before the underlying file is deleted. Formats Pillow
+        lacks a codec for (e.g. ``.jp2`` without OpenJPEG) need your own decoder on ``.path``
+        (e.g. ``imagecodecs.imread``).
+        """
         from PIL import Image
 
         return Image.open(self.path)
@@ -353,9 +358,11 @@ def batched_files(
 
     Batch size is capped by **file count** (``n``) and/or **total bytes** (``max_bytes``),
     whichever is hit first. ``max_bytes`` is the better bound for a predictable footprint when
-    files vary in size — disk high-water is then ≈ ``(prefetch + 1) * max_bytes`` regardless of
-    file type. It needs file sizes, which bucketbag has when it lists for you (or when you pass
-    ``BucketFile`` objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
+    files vary in size — scratch high-water is then ≈ ``(prefetch + 1) * max_bytes`` regardless
+    of file type. NB the default scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so size
+    that budget against available memory, or pass ``dir=`` to use real disk. ``max_bytes`` needs
+    file sizes, which bucketbag has when it lists for you (or when you pass ``BucketFile``
+    objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
 
     When the helper lists for you it keeps the ``BucketFile`` objects and passes them to
     ``download_bucket_files``, which skips the per-file metadata fetch. (Passing ``keys=`` as

@@ -17,8 +17,7 @@ import logging
 
 import pytest
 from conftest import bfiles, count_bb_dirs, make_fake_download
-from huggingface_hub import HfApi
-from huggingface_hub._buckets import BucketFile
+from huggingface_hub import BucketFile, HfApi
 
 from bucketbag import batched_files
 

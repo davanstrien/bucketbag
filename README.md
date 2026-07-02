@@ -34,7 +34,9 @@ for batch in batched_files("davanstrien/my-bucket", include="**/*.jp2", n=32):
     ...
 ```
 
-Disk high-water ≈ `(prefetch + 1) × max_bytes`. `prefetch=2` (default) overlaps downloads with your work.
+Scratch high-water ≈ `(prefetch + 1) × max_bytes` — and the default scratch dir is `/dev/shm`
+(**RAM tmpfs, not disk**), so size that against available memory or pass `dir=` for real disk.
+`prefetch=2` (default) overlaps downloads with your work.
 The only rule: **don't keep a `LoadedItem`/`.path` past its batch** — the file is already gone.
 
 ## Resume (your loop, your rules)

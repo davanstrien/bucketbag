@@ -11,8 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from huggingface_hub import HfApi
-from huggingface_hub._buckets import BucketFile
+from huggingface_hub import BucketFile, HfApi
 
 
 def bf(path: str, size: int = 10) -> BucketFile:
