@@ -11,7 +11,6 @@ dependencies = [
     "huggingface-hub>=1.12",
     "hf-xet",
     "toolz",
-    "pyarrow>=15.0",
     "pillow",
 ]
 

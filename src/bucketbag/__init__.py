@@ -53,7 +53,9 @@ __all__ = [
     "iter_keys",
     "batched_files",
     "completed_keys",
-    "write_parquet",
+    "put_bytes",
+    "put_files",
+    "put_text",
     "boost",
     "partition_all",
 ]
@@ -486,7 +488,14 @@ def completed_keys(
     Reads only ``column`` from every ``.parquet`` object under ``prefix`` in ``out_bucket``.
     Returns an empty set if nothing is there yet.
     """
-    import pyarrow.parquet as pq
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pyarrow is not a bucketbag dependency
+        raise ImportError(
+            "completed_keys reads parquet outputs and needs pyarrow, which bucketbag does not "
+            "install. Add pyarrow to your script's dependencies (or resume by listing your "
+            "outputs with iter_keys and mapping keys back)."
+        ) from exc
     from huggingface_hub import HfFileSystem
 
     bucket_id, embedded_prefix = _parse_bucket(out_bucket)
@@ -509,41 +518,50 @@ def completed_keys(
 
 
 # ---------------------------------------------------------------------------
-# write_parquet — optional one-shot push
+# put_bytes / put_text / put_files — per-object writes
 # ---------------------------------------------------------------------------
-def write_parquet(
-    rows: Iterable[dict[str, Any]],
+def put_files(
+    files: Iterable[tuple[str, bytes | str]],
+    out_bucket: str,
+    *,
+    encoding: str = "utf-8",
+    token: str | bool | None = None,
+) -> None:
+    """Upload many ``(key, content)`` pairs to the bucket in one batch.
+
+    Each ``key`` lands under any prefix embedded in ``out_bucket``; ``str`` content is encoded
+    with ``encoding``. One API call for the whole batch — use this (not a :func:`put_bytes`
+    loop) when writing a batch of outputs, e.g. one ``.md`` per processed page.
+    """
+    bucket_id, embedded_prefix = _parse_bucket(out_bucket)
+    add: list[tuple[bytes, str]] = []
+    for key, content in files:
+        data = content.encode(encoding) if isinstance(content, str) else content
+        dest = f"{embedded_prefix}/{key}" if embedded_prefix else key
+        add.append((data, dest))
+    if not add:
+        return
+    HfApi(token=token).batch_bucket_files(bucket_id, add=add, token=token)
+
+
+def put_bytes(
+    data: bytes,
     out_bucket: str,
     key: str,
     *,
     token: str | bool | None = None,
 ) -> None:
-    """Write ``rows`` (list of dicts) as one parquet object to the bucket.
+    """Write one object to the bucket (``key`` under any prefix embedded in ``out_bucket``)."""
+    put_files([(key, data)], out_bucket, token=token)
 
-    The destination is ``key`` under any prefix embedded in ``out_bucket``. Columns are the
-    union of the row keys, preserving first-seen order. No-op for empty ``rows``.
-    """
-    import io as _io
 
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    rows = list(rows)
-    if not rows:
-        return
-
-    columns: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for k in row:
-            if k not in seen:
-                seen.add(k)
-                columns.append(k)
-    table = pa.Table.from_pydict({c: [row.get(c) for row in rows] for c in columns})
-
-    buf = _io.BytesIO()
-    pq.write_table(table, buf, compression="zstd")
-
-    bucket_id, embedded_prefix = _parse_bucket(out_bucket)
-    dest = f"{embedded_prefix}/{key}" if embedded_prefix else key
-    HfApi(token=token).batch_bucket_files(bucket_id, add=[(buf.getvalue(), dest)], token=token)
+def put_text(
+    text: str,
+    out_bucket: str,
+    key: str,
+    *,
+    encoding: str = "utf-8",
+    token: str | bool | None = None,
+) -> None:
+    """Write one text object to the bucket (encoded with ``encoding``)."""
+    put_files([(key, text)], out_bucket, encoding=encoding, token=token)

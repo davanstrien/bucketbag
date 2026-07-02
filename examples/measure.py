@@ -7,8 +7,9 @@
 """Minimal bucketbag example: measure pages in a bucket, bounded + resumable.
 
 An I/O-only pass over Biodiversity Heritage Library page images: download in batches to a temp
-dir (auto-cleaned), record one row per page, write parquet back to a bucket, and resume by
-skipping pages already done. No image decoding — this is about the read/batch/cleanup loop.
+dir (auto-cleaned), write one small ``.json`` per page back to a bucket, and resume by skipping
+pages whose output already exists. No image decoding — this is about the
+read/batch/write/cleanup loop.
 
     uv run examples/measure.py                 # ~300 pages, prefetch=2
     uv run examples/measure.py --limit 600 --n 64 --prefetch 3
@@ -20,6 +21,7 @@ Set HF_XET_HIGH_PERFORMANCE=1 for best throughput (done below).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import resource
 import sys
@@ -30,7 +32,7 @@ os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 from huggingface_hub import create_bucket  # noqa: E402
 
-from bucketbag import batched_files, boost, completed_keys, iter_keys, write_parquet  # noqa: E402
+from bucketbag import batched_files, boost, iter_keys, put_files  # noqa: E402
 
 SRC = "davanstrien/finebooks-bhl-pilot"
 OUT = "davanstrien/bucketbag-mvp-out"
@@ -74,9 +76,9 @@ def main() -> None:
 
     create_bucket(OUT, exist_ok=True)
 
-    # Resume: list candidate keys, drop the ones already written.
+    # Resume by output existence: a page is done iff its `<key>.json` is already in OUT.
     all_keys = list(iter_keys(SRC, include=args.include, limit=args.limit))
-    done = completed_keys(OUT)
+    done = {k.removesuffix(".json") for k in iter_keys(OUT, include="**/*.json")}
     todo = [k for k in all_keys if k not in done]
     skipped = len(all_keys) - len(todo)
     print(
@@ -92,10 +94,10 @@ def main() -> None:
     processed = 0
     for batch in batched_files(SRC, keys=todo, n=args.n, prefetch=args.prefetch, dir=scratch):
         high_water = max(high_water, dir_size_mb(scratch))
-        rows = [{"__source_key": it.key, "n_bytes": len(it.bytes)} for it in batch]
-        # deterministic, idempotent shard name from the first key in the batch
-        name = "part-" + batch[0].key.replace("/", "_").rsplit(".", 1)[0] + ".parquet"
-        write_parquet(rows, OUT, name)
+        put_files(
+            [(it.key + ".json", json.dumps({"n_bytes": len(it.bytes)})) for it in batch],
+            OUT,
+        )
         processed += len(batch)
         print(
             f"  +{len(batch):>3} pages (total {processed}/{len(todo)}) "
