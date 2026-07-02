@@ -6,8 +6,9 @@ every call passes explicit ``keys=``.
 
 The cleanup guarantee is the library's load-bearing claim, so it's tested across
 ``prefetch in {0, 1, 2}`` on (a) normal completion, (b) a consumer exception, and (c) a download
-failure. The prefetch>0 exception/failure paths currently **leak** temp dirs — that is issue #2,
-reproduced here as strict ``xfail`` so the suite stays green while pinning the bug.
+failure. The prefetch>0 exception/failure paths used to leak temp dirs (issue #2, fixed by
+draining the lookahead deque in a ``finally``); the former strict-xfail repros now run as
+regular regression tests.
 """
 
 from __future__ import annotations
@@ -58,15 +59,6 @@ def test_cleans_up_on_consumer_exception_prefetch_0(fake_download, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Reproduces #2: with prefetch>0 the consumer's exception only triggers cleanup of the "
-        "currently-yielded batch; batches already downloaded in the lookahead deque are abandoned. "
-        "When #2 is fixed (drain+rmtree the whole futures deque in a finally), this becomes xpass "
-        "and strict=True will flag it so the marker is removed."
-    ),
-)
 def test_cleans_up_on_consumer_exception_prefetch_2(fake_download, tmp_path):
     keys = bfiles(9, size=4)
     with pytest.raises(RuntimeError, match="boom"):
@@ -90,13 +82,6 @@ def test_cleans_up_on_download_failure_prefetch_0(monkeypatch, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Reproduces #2 (download-failure variant): the failing batch raises on .result(), but the "
-        "already-completed lookahead batches in the deque are never rmtree'd. Fixed alongside #2."
-    ),
-)
 def test_cleans_up_on_download_failure_prefetch_2(monkeypatch, tmp_path):
     monkeypatch.setattr(HfApi, "download_bucket_files", make_fake_download(fail_on_call=3))
     keys = bfiles(9, size=4)

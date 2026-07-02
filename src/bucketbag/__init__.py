@@ -345,8 +345,9 @@ def batched_files(
 
     Lists the bucket (or uses ``keys=``), then downloads files in batches to ``dir`` (default
     ``/dev/shm`` if available, else the system temp) and yields ``list[LoadedItem]``. Each batch's
-    files are removed before the loop advances, so disk stays bounded. Cleanup is guaranteed even
-    on exception.
+    files are removed before the loop advances, so the footprint stays bounded. Cleanup is
+    guaranteed even on exception — including prefetched lookahead batches when the consumer
+    stops early.
 
     Batch size is capped by **file count** (``n``) and/or **total bytes** (``max_bytes``),
     whichever is hit first. ``max_bytes`` is the better bound for a predictable footprint when
@@ -441,18 +442,33 @@ def batched_files(
     with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="bb-dl") as ex:
         futures: deque = deque()
         nxt = 0
-        while nxt < len(chunks) and len(futures) < in_flight:
-            futures.append(ex.submit(_download_chunk, chunks[nxt]))
-            nxt += 1
-        while futures:
-            tmpdir, present = futures.popleft().result()
-            if nxt < len(chunks):
+        try:
+            while nxt < len(chunks) and len(futures) < in_flight:
                 futures.append(ex.submit(_download_chunk, chunks[nxt]))
                 nxt += 1
-            try:
-                yield present
-            finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+            while futures:
+                tmpdir, present = futures.popleft().result()
+                if nxt < len(chunks):
+                    futures.append(ex.submit(_download_chunk, chunks[nxt]))
+                    nxt += 1
+                try:
+                    yield present
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+        finally:
+            # Drain the lookahead (issue #2): if the consumer stops early (exception,
+            # GeneratorExit) or a download fails mid-loop, batches already fetched — or
+            # still in flight — in the prefetch deque must be deleted too, not just the
+            # currently-yielded one. A not-yet-started future is cancelled (no tmpdir
+            # exists yet); a failed one already removed its own tmpdir in _download_chunk.
+            for fut in futures:
+                if fut.cancel():
+                    continue
+                try:
+                    leftover_tmpdir, _ = fut.result()
+                except Exception:
+                    continue
+                shutil.rmtree(leftover_tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
