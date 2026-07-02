@@ -335,7 +335,7 @@ def _pack(
 def batched_files(
     bucket: str,
     *,
-    keys: Iterable[str] | None = None,
+    keys: Iterable[BucketFile | str] | None = None,
     prefix: str | None = None,
     include: str | None = None,
     exclude: str | None = None,
@@ -572,3 +572,12 @@ def put_text(
 ) -> None:
     """Write one text object to the bucket (encoded with ``encoding``)."""
     put_files([(key, text)], out_bucket, encoding=encoding, token=token)
+
+
+# ---------------------------------------------------------------------------
+# Bag — lazy plan over the helpers above (imported last: bag.py imports back
+# into this module, so the core names must already exist).
+# ---------------------------------------------------------------------------
+from .bag import Bag, BagStats  # noqa: E402
+
+__all__ += ["Bag", "BagStats"]

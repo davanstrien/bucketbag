@@ -62,6 +62,25 @@ done = completed_keys(OUT)             # __source_key values already written to 
 Writing parquet itself is your tool's job (polars / pyarrow straight to the bucket) — bucketbag
 only writes raw objects (`put_files` / `put_bytes` / `put_text`).
 
+## `Bag` — the same loop as a plan (experimental)
+
+A lazy, dask.bag-style chain over the helpers above — listing, resume, bounded download,
+batched writes in one shape:
+
+```python
+from bucketbag import Bag
+
+bag = (Bag.from_bucket(SRC, include="**/*.jp2")
+         .map_batches(ocr_batch, batch_size=32, setup=load_model)   # fn(items[, ctx]) -> [(key, content)]
+         .to_bucket(OUT))
+bag.take(3)        # dev peek: outputs for the first 3 items, nothing written
+bag.compute()      # list -> skip done -> download batches -> fn -> put_files; kill + re-run safe
+```
+
+Resume contract: an input is done iff an output key **starts with** its source key (so emit
+`it.key + ".md"`-style keys). `compute()` runs in-process for now — Jobs fan-out
+(`shards -> one Job each`) is the planned next layer on this same plan object.
+
 ## API
 
 | | |
@@ -72,6 +91,7 @@ only writes raw objects (`put_files` / `put_bytes` / `put_text`).
 | `put_files(pairs, out_bucket, *, encoding, token)` / `put_bytes` / `put_text` | write raw objects; `put_files` batches many in one call |
 | `boost(*, file_concurrency=32, high_performance=True)` | raise xet download concurrency (~2.5× on small files) |
 | `LoadedItem` | `.key` `.path` + lazy `.bytes` `.image` `.text()` `.json()` |
+| `Bag.from_bucket(...).map_batches(fn, ...).to_bucket(out)` + `.take(n)` / `.compute()` | the loop as a lazy plan (see above) |
 | `partition_all` | re-exported from `toolz` |
 
 `bucket` = `"ns/bucket"`, `"ns/bucket/prefix"`, or `"hf://buckets/ns/bucket/prefix"`. Globs: `*` within a
