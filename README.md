@@ -9,10 +9,11 @@ A minimal, [toolz](https://toolz.readthedocs.io/)-style helper for **batched, bo
 ```toml
 # uv script PEP 723 header
 # /// script
-# dependencies = ["bucketbag @ git+https://github.com/davanstrien/bucketbag"]
+# dependencies = ["bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.2.0"]
 # ///
 ```
-(or `uv add "bucketbag @ git+https://github.com/davanstrien/bucketbag"` / `pip install -e .`)
+(or `uv add "bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.2.0"` / `pip install -e .`;
+pin a tag — HEAD moves)
 
 ## `batched_files` — the one verb
 

@@ -1,6 +1,6 @@
 [project]
 name = "bucketbag"
-version = "0.1.0"
+version = "0.2.0"
 description = "A minimal, toolz-style helper for batched, bounded-memory access to Hugging Face bucket files."
 readme = "README.md"
 requires-python = ">=3.10"

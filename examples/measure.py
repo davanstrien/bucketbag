@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "bucketbag @ git+https://github.com/davanstrien/bucketbag",
+#     "bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.2.0",
 # ]
 # ///
 """Minimal bucketbag example: measure pages in a bucket, bounded + resumable.
