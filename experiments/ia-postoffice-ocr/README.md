@@ -55,13 +55,44 @@ The whole I/O side of the script is:
 
 Resume = re-run the same command; pages with outputs are skipped.
 
-## Results
+## Results (2026-07-03)
 
-*(filled in as runs complete)*
+| run | flavor | pages | pages/min | inference share of wall | $/1k pages |
+| --- | --- | --- | --- | --- | --- |
+| mirror (IA → bucket, cpu) | cpu-upgrade | 6,904 | ~2,000 (34/s upload) | n/a | ~$0.03 |
+| Bag smoke (batch 16, prefetch 2) | a10g-small | 24 | 3.3 (incl. engine load) | — | — |
+| Bag 500-page run | a10g-small | 476 | **7.7** (8.0 steady-state) | **~88%** | **~$2.2** |
+| recipe `--io-mode mount` (same pages) | a10g-small | 500 | 7.5 | ~86% (serial FUSE reads = 13.6%) | ~$2.2 |
 
-| run | flavor | pages | batch | prefetch | pages/min | inference share of wall | $/1k pages |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+- **Resume verified on real state**: the 500-run logged `24 inputs already done, 476 to do` and skipped the smoke's pages. Listing + resume-scan overhead: **~3 s** of a 62-min job.
+- **The workload is inference-bound (~88%)**, so the I/O path is invisible in throughput terms —
+  Surya at ~0.13 pages/s is far below even a slow read path. bucketbag's contribution here is
+  not speed: it's the ~6-line I/O layer, bounded scratch, and **resume across the timeout
+  ceiling** (the full 6,900-page corpus is ~14 h on one GPU — only runnable as kill/re-run,
+  or fanned out across jobs, which is the planned `Bag` next layer).
+- Cost: ~$0.0022/page with a 650M layout-aware model on $1/hr hardware.
+- **Mount comparison (unmodified upstream recipe, same 500 pages, same flavor):** 8.0 s/page
+  vs Bag's 7.8 s/page — a ~3% difference, i.e. **the I/O path is irrelevant for VLM-class OCR**,
+  as the inference share predicted. Engine speed identical (6.9 s/page both). The measured
+  difference in kind: mount reads are **serial** at 0.92 files/s (545 s of the loop); Bag's
+  prefetch overlaps downloads with compute. With a model ~10× faster than Surya (PP-OCR-class),
+  serial 1.1 s/page FUSE reads would cap throughput at ~55 pages/min while the overlapped API
+  path keeps the GPU fed — that's the crossover where the read path starts to matter.
+- **Output parity: mean text similarity 1.000** across a 12-page stratified sample
+  (500/500 outputs present on both sides; two pages differ by 1–2 chars — token-margin
+  nondeterminism). The Bag port reproduces the recipe exactly. FUSE writes also all landed
+  in this run.
 
-Notes / gotchas:
+Gotchas hit (each one commit):
 
-- (pending)
+- `surya-ocr==0.20.0` pins `huggingface-hub<1`; bucketbag needs `>=1.12` — unsolvable resolve,
+  escaped via `[tool.uv] override-dependencies` (safe here: the image's hub 1.x wins on
+  PYTHONPATH at runtime, the same runtime the upstream recipe is validated on).
+- The vllm-openai image has **no git** — install bucketbag from the GitHub **tag tarball**,
+  not `git+`.
+- l4x1 sat in SCHEDULING; a10g-small scheduled immediately (same 24 GB class).
+- Bucket listing prefixes are **string** prefixes: `prefix="surya"` also matches `surya-mount/...`.
+  Use a trailing-slash-aware filter when prefixes can collide.
+- Key conventions differ: the recipe *replaces* the extension (`X.md`), bucketbag examples
+  *append* (`X.jp2.md` — which the Bag resume contract needs, since done-ness is
+  output-key-starts-with-source-key).
