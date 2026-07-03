@@ -11,6 +11,13 @@
 # # surya-ocr pinned to the known-good build with the `surya.inference` engine layout
 # # (same pin rationale as uv-scripts-for-ai's surya recipes). vLLM and torch come from
 # # the vllm-openai IMAGE via PYTHONPATH, not this venv.
+# #
+# # surya-ocr declares huggingface-hub<1 while bucketbag needs >=1.12 — an unsolvable
+# # resolve. Override it: at runtime PYTHONPATH puts the image's hub 1.x first anyway
+# # (the same runtime the upstream recipe is validated on), so the venv constraint is
+# # cosmetic. This is the documented cost of using bucketbag next to old-hub-pinned libs.
+# [tool.uv]
+# override-dependencies = ["huggingface-hub>=1.12"]
 # ///
 """bucketbag throughput experiment: Surya OCR 2 over IA post-office directories.
 
