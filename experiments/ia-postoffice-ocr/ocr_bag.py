@@ -1,7 +1,8 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.2.0",
+#     # tarball not git+: the vllm-openai image has no git binary for uv to shell out to
+#     "bucketbag @ https://github.com/davanstrien/bucketbag/archive/refs/tags/v0.2.0.tar.gz",
 #     "surya-ocr==0.20.0",
 #     "beautifulsoup4",
 #     "imagecodecs",
