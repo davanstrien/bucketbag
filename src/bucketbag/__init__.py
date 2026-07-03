@@ -7,8 +7,9 @@ batch-download-process-cleanup loop into one composable verb.
 
 The headline helper is :func:`batched_files` — think ``toolz.partition_all`` for *bucket
 files*, except each batch is downloaded to a temp dir and **deleted before the next** (bounded
-disk), with optional prefetch overlap. It is **file-type agnostic**: a :class:`LoadedItem` is
-just a key + a local path + raw bytes, with opt-in lazy ``.image`` / ``.text()`` / ``.json()``.
+scratch space), with optional prefetch overlap. It is **file-type agnostic**: a
+:class:`LoadedItem` is just a key + a local path + raw bytes, with opt-in lazy ``.image`` /
+``.text()`` / ``.json()``.
 
     from bucketbag import batched_files
 
@@ -44,8 +45,7 @@ from typing import Any
 if os.environ.get("BUCKETBAG_NO_XET_TUNE", "").lower() not in ("1", "true", "yes", "on"):
     os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
-from huggingface_hub import HfApi  # noqa: E402
-from huggingface_hub._buckets import BucketFile  # noqa: E402
+from huggingface_hub import BucketFile, HfApi  # noqa: E402
 from toolz import partition_all  # noqa: E402
 
 __all__ = [
@@ -53,12 +53,14 @@ __all__ = [
     "iter_keys",
     "batched_files",
     "completed_keys",
-    "write_parquet",
+    "put_bytes",
+    "put_files",
+    "put_text",
     "boost",
     "partition_all",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 logger = logging.getLogger("bucketbag")
 
@@ -68,24 +70,23 @@ _BUCKET_PREFIX = "hf://buckets/"
 def boost(*, file_concurrency: int = 32, high_performance: bool = True) -> None:
     """Raise xet download concurrency for **many-small-files** workloads (e.g. page images).
 
-    Sets xet's per-process concurrent-file-download cap (default 8) higher. On ~1 MB files this
-    roughly **2.5x'd** throughput in our l4x1 benchmark and made the HfApi path beat both raw
-    download and HfFileSystem. Use a **low** value (or don't call this) for **large** files: each
-    file already fans out into ``HF_XET_NUM_CONCURRENT_RANGE_GETS`` (16) internal range GETs, so a
-    high cap means ~``file_concurrency * 16`` connections and that many large files buffering at
-    once — over-subscription and a memory/disk blowup.
+    Sets ``HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`` — xet's per-process concurrent-file
+    download cap (default 8) — higher. On ~1 MB files this roughly **2.5x'd** throughput in our
+    l4x1 benchmark and made the HfApi path beat both raw download and HfFileSystem. Use a **low**
+    value (or don't call this) for **large** files: each file's chunk fetches are managed by
+    xet's own connection/concurrency machinery, so many large files in flight at once means that
+    many files buffering concurrently — over-subscription and a memory/disk blowup.
 
     Call this **before your first** :func:`batched_files`/download: xet reads these env vars when
     its runtime first initializes (on the first download), so a call beforehand is picked up. It
     does not override env vars you have already exported.
 
-    Note: the file-concurrency vars are not yet documented in ``huggingface_hub`` (best-effort — an
+    Note: the file-concurrency var is not documented in ``huggingface_hub`` (best-effort — an
     unknown var is ignored, never an error); ``HF_XET_HIGH_PERFORMANCE`` is documented.
     """
     if high_performance:
         os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
     os.environ.setdefault("HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
-    os.environ.setdefault("HF_XET_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,13 @@ class LoadedItem:
 
     @property
     def image(self):
-        """Lazily open the file as a ``PIL.Image`` (raises if the bytes aren't an image)."""
+        """Lazily open the file as a ``PIL.Image`` (raises if the bytes aren't an image).
+
+        Each access re-opens the file, and ``Image.open`` is itself lazy — **decode (or
+        ``.load()``) within the batch**, before the underlying file is deleted. Formats Pillow
+        lacks a codec for (e.g. ``.jp2`` without OpenJPEG) need your own decoder on ``.path``
+        (e.g. ``imagecodecs.imread``).
+        """
         from PIL import Image
 
         return Image.open(self.path)
@@ -328,7 +335,7 @@ def _pack(
 def batched_files(
     bucket: str,
     *,
-    keys: Iterable[str] | None = None,
+    keys: Iterable[BucketFile | str] | None = None,
     prefix: str | None = None,
     include: str | None = None,
     exclude: str | None = None,
@@ -345,14 +352,17 @@ def batched_files(
 
     Lists the bucket (or uses ``keys=``), then downloads files in batches to ``dir`` (default
     ``/dev/shm`` if available, else the system temp) and yields ``list[LoadedItem]``. Each batch's
-    files are removed before the loop advances, so disk stays bounded. Cleanup is guaranteed even
-    on exception.
+    files are removed before the loop advances, so the footprint stays bounded. Cleanup is
+    guaranteed even on exception — including prefetched lookahead batches when the consumer
+    stops early.
 
     Batch size is capped by **file count** (``n``) and/or **total bytes** (``max_bytes``),
     whichever is hit first. ``max_bytes`` is the better bound for a predictable footprint when
-    files vary in size — disk high-water is then ≈ ``(prefetch + 1) * max_bytes`` regardless of
-    file type. It needs file sizes, which bucketbag has when it lists for you (or when you pass
-    ``BucketFile`` objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
+    files vary in size — scratch high-water is then ≈ ``(prefetch + 1) * max_bytes`` regardless
+    of file type. NB the default scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so size
+    that budget against available memory, or pass ``dir=`` to use real disk. ``max_bytes`` needs
+    file sizes, which bucketbag has when it lists for you (or when you pass ``BucketFile``
+    objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
 
     When the helper lists for you it keeps the ``BucketFile`` objects and passes them to
     ``download_bucket_files``, which skips the per-file metadata fetch. (Passing ``keys=`` as
@@ -441,18 +451,33 @@ def batched_files(
     with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="bb-dl") as ex:
         futures: deque = deque()
         nxt = 0
-        while nxt < len(chunks) and len(futures) < in_flight:
-            futures.append(ex.submit(_download_chunk, chunks[nxt]))
-            nxt += 1
-        while futures:
-            tmpdir, present = futures.popleft().result()
-            if nxt < len(chunks):
+        try:
+            while nxt < len(chunks) and len(futures) < in_flight:
                 futures.append(ex.submit(_download_chunk, chunks[nxt]))
                 nxt += 1
-            try:
-                yield present
-            finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+            while futures:
+                tmpdir, present = futures.popleft().result()
+                if nxt < len(chunks):
+                    futures.append(ex.submit(_download_chunk, chunks[nxt]))
+                    nxt += 1
+                try:
+                    yield present
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+        finally:
+            # Drain the lookahead (issue #2): if the consumer stops early (exception,
+            # GeneratorExit) or a download fails mid-loop, batches already fetched — or
+            # still in flight — in the prefetch deque must be deleted too, not just the
+            # currently-yielded one. A not-yet-started future is cancelled (no tmpdir
+            # exists yet); a failed one already removed its own tmpdir in _download_chunk.
+            for fut in futures:
+                if fut.cancel():
+                    continue
+                try:
+                    leftover_tmpdir, _ = fut.result()
+                except Exception:
+                    continue
+                shutil.rmtree(leftover_tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +495,14 @@ def completed_keys(
     Reads only ``column`` from every ``.parquet`` object under ``prefix`` in ``out_bucket``.
     Returns an empty set if nothing is there yet.
     """
-    import pyarrow.parquet as pq
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pyarrow is not a bucketbag dependency
+        raise ImportError(
+            "completed_keys reads parquet outputs and needs pyarrow, which bucketbag does not "
+            "install. Add pyarrow to your script's dependencies (or resume by listing your "
+            "outputs with iter_keys and mapping keys back)."
+        ) from exc
     from huggingface_hub import HfFileSystem
 
     bucket_id, embedded_prefix = _parse_bucket(out_bucket)
@@ -493,41 +525,59 @@ def completed_keys(
 
 
 # ---------------------------------------------------------------------------
-# write_parquet — optional one-shot push
+# put_bytes / put_text / put_files — per-object writes
 # ---------------------------------------------------------------------------
-def write_parquet(
-    rows: Iterable[dict[str, Any]],
+def put_files(
+    files: Iterable[tuple[str, bytes | str]],
+    out_bucket: str,
+    *,
+    encoding: str = "utf-8",
+    token: str | bool | None = None,
+) -> None:
+    """Upload many ``(key, content)`` pairs to the bucket in one batch.
+
+    Each ``key`` lands under any prefix embedded in ``out_bucket``; ``str`` content is encoded
+    with ``encoding``. One API call for the whole batch — use this (not a :func:`put_bytes`
+    loop) when writing a batch of outputs, e.g. one ``.md`` per processed page.
+    """
+    bucket_id, embedded_prefix = _parse_bucket(out_bucket)
+    add: list[tuple[bytes, str]] = []
+    for key, content in files:
+        data = content.encode(encoding) if isinstance(content, str) else content
+        dest = f"{embedded_prefix}/{key}" if embedded_prefix else key
+        add.append((data, dest))
+    if not add:
+        return
+    HfApi(token=token).batch_bucket_files(bucket_id, add=add, token=token)
+
+
+def put_bytes(
+    data: bytes,
     out_bucket: str,
     key: str,
     *,
     token: str | bool | None = None,
 ) -> None:
-    """Write ``rows`` (list of dicts) as one parquet object to the bucket.
+    """Write one object to the bucket (``key`` under any prefix embedded in ``out_bucket``)."""
+    put_files([(key, data)], out_bucket, token=token)
 
-    The destination is ``key`` under any prefix embedded in ``out_bucket``. Columns are the
-    union of the row keys, preserving first-seen order. No-op for empty ``rows``.
-    """
-    import io as _io
 
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+def put_text(
+    text: str,
+    out_bucket: str,
+    key: str,
+    *,
+    encoding: str = "utf-8",
+    token: str | bool | None = None,
+) -> None:
+    """Write one text object to the bucket (encoded with ``encoding``)."""
+    put_files([(key, text)], out_bucket, encoding=encoding, token=token)
 
-    rows = list(rows)
-    if not rows:
-        return
 
-    columns: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for k in row:
-            if k not in seen:
-                seen.add(k)
-                columns.append(k)
-    table = pa.Table.from_pydict({c: [row.get(c) for row in rows] for c in columns})
+# ---------------------------------------------------------------------------
+# Bag — lazy plan over the helpers above (imported last: bag.py imports back
+# into this module, so the core names must already exist).
+# ---------------------------------------------------------------------------
+from .bag import Bag, BagStats  # noqa: E402
 
-    buf = _io.BytesIO()
-    pq.write_table(table, buf, compression="zstd")
-
-    bucket_id, embedded_prefix = _parse_bucket(out_bucket)
-    dest = f"{embedded_prefix}/{key}" if embedded_prefix else key
-    HfApi(token=token).batch_bucket_files(bucket_id, add=[(buf.getvalue(), dest)], token=token)
+__all__ += ["Bag", "BagStats"]

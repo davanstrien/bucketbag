@@ -1,6 +1,6 @@
 [project]
 name = "bucketbag"
-version = "0.1.0"
+version = "0.2.0"
 description = "A minimal, toolz-style helper for batched, bounded-memory access to Hugging Face bucket files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -11,7 +11,6 @@ dependencies = [
     "huggingface-hub>=1.12",
     "hf-xet",
     "toolz",
-    "pyarrow>=15.0",
     "pillow",
 ]
 
@@ -46,6 +45,11 @@ dev = [
 # Pin the index to public PyPI so the lockfile resolves against the canonical registry,
 # independent of any ambient uv config (e.g. a machine-local index-url). This keeps
 # `uv sync` reproducible for CI and other contributors.
+#
+# Same class of problem, second instance: regenerate the lock with `uv lock --no-config`.
+# A machine-global `exclude-newer` otherwise bakes an `[options]` block into uv.lock that
+# CI (with no such config) rejects under `--locked`. Locally, prefer
+# `uv sync --frozen` / `uv run --no-sync` to avoid churning the lock back.
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple"
