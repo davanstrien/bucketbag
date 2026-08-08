@@ -168,6 +168,8 @@ def test_resume_composition_honors_max_bytes(monkeypatch, tmp_path):
     # Resume dropped 0 and 1; what's left is sized, so max_bytes binds.
     assert [k.path for k in keys] == ["2.jp2", "3.jp2"]
     batches = list(batched_files(SRC, keys=keys, max_bytes=15, prefetch=0, dir=tmp_path))
-    # 10 + 10 = 20 > 15, so they split — max_bytes is honored, not silently dropped.
+    # Non-vacuous via the "fewer items than n" route: only 2 files vs the default n=20, so the
+    # count cap can never bind — the split is purely byte-driven (10+10=20 > 15). Dropping
+    # max_bytes would collapse this to one batch and fail the assertion below.
     assert [[it.key for it in b] for b in batches] == [["2.jp2"], ["3.jp2"]]
     assert count_bb_dirs(tmp_path) == 0

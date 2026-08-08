@@ -436,6 +436,8 @@ def batched_files(
         return tmpdir, present
 
     if max_bytes is not None and not all(isinstance(r, BucketFile) for r in remotes):
+        # `remotes` is already a list (list(keys) or list(_list_bucketfiles(...)) above), so this
+        # all() can't exhaust a generator before _pack sees it — safe to scan in full.
         raise ValueError(
             "max_bytes requires sized keys, but string keys were given (sizes are unknown, "
             "so the byte bound could not be honored). Pass BucketFile objects as keys "
