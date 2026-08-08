@@ -60,7 +60,7 @@ __all__ = [
     "partition_all",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 logger = logging.getLogger("bucketbag")
 
@@ -277,8 +277,9 @@ def iter_keys(
     exclude: str | None = None,
     start_after: str | None = None,
     limit: int | None = None,
+    objects: bool = False,
     token: str | bool | None = None,
-) -> Iterator[str]:
+) -> Iterator[BucketFile | str]:
     """List keys under a bucket prefix, glob-filtered and sorted (deterministic).
 
     Args:
@@ -288,9 +289,13 @@ def iter_keys(
         include / exclude: glob patterns matched against the full key (``**`` crosses ``/``).
         start_after: skip keys ``<= start_after`` (a cheap cursor to start mid-corpus).
         limit: cap the number of keys returned.
+        objects: yield :class:`~huggingface_hub.BucketFile` objects (carrying ``.size``)
+            instead of key strings. Needed to feed :func:`batched_files` ``keys=`` together
+            with ``max_bytes`` — string keys carry no size, so ``max_bytes`` cannot be honored.
 
     Yields:
-        Bucket-relative keys (strings), sorted.
+        Bucket-relative keys (strings by default; ``BucketFile`` objects with
+        ``objects=True``), sorted.
     """
     bucket_id, embedded_prefix = _parse_bucket(bucket)
     effective_prefix = prefix if prefix is not None else (embedded_prefix or None)
@@ -303,7 +308,7 @@ def iter_keys(
         limit=limit,
         token=token,
     ):
-        yield f.path
+        yield f if objects else f.path
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +367,9 @@ def batched_files(
     of file type. NB the default scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so size
     that budget against available memory, or pass ``dir=`` to use real disk. ``max_bytes`` needs
     file sizes, which bucketbag has when it lists for you (or when you pass ``BucketFile``
-    objects as ``keys``); with bare string keys ``max_bytes`` is ignored (warned).
+    objects as ``keys``, e.g. from ``iter_keys(..., objects=True)``); passing bare string keys
+    together with ``max_bytes`` **raises** ``ValueError`` — the bound cannot be honored, and
+    silently running unbounded against RAM tmpfs is worse than failing fast.
 
     When the helper lists for you it keeps the ``BucketFile`` objects and passes them to
     ``download_bucket_files``, which skips the per-file metadata fetch. (Passing ``keys=`` as
@@ -428,12 +435,15 @@ def batched_files(
             logger.warning("Skipped %d missing file(s) in batch", len(items) - len(present))
         return tmpdir, present
 
-    if max_bytes is not None and not isinstance(remotes[0], BucketFile):
-        logger.warning(
-            "max_bytes ignored: file sizes are unknown for string keys "
-            "(let batched_files list, or pass BucketFile objects as keys)."
+    if max_bytes is not None and not all(isinstance(r, BucketFile) for r in remotes):
+        # `remotes` is already a list (list(keys) or list(_list_bucketfiles(...)) above), so this
+        # all() can't exhaust a generator before _pack sees it — safe to scan in full.
+        raise ValueError(
+            "max_bytes requires sized keys, but string keys were given (sizes are unknown, "
+            "so the byte bound could not be honored). Pass BucketFile objects as keys "
+            "(e.g. iter_keys(..., objects=True)), let batched_files do the listing (omit keys=), "
+            "or drop max_bytes."
         )
-        max_bytes = None
     chunks = list(_pack(remotes, n, max_bytes))
 
     if prefetch <= 0:

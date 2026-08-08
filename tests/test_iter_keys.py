@@ -45,3 +45,12 @@ def test_iter_keys_skips_non_files(fake_list):
     # A directory-like entry (type != "file") must be dropped before sorting/yielding.
     fake_list([bf("a/1.txt"), SimpleNamespace(type="directory", path="a")])
     assert list(iter_keys("ns/bucket")) == ["a/1.txt"]
+
+
+def test_iter_keys_objects_yields_bucketfile(fake_list):
+    # objects=True yields the BucketFile objects (with .size) instead of key strings, so they
+    # can be fed to batched_files(keys=..., max_bytes=...) where sizes are required.
+    fake_list([bf("a/1.jp2", size=7), bf("a/2.jp2", size=9)])
+    out = list(iter_keys("ns/bucket", include="**/*.jp2", objects=True))
+    assert [type(f).__name__ for f in out] == ["BucketFile", "BucketFile"]
+    assert [(f.path, f.size) for f in out] == [("a/1.jp2", 7), ("a/2.jp2", 9)]
