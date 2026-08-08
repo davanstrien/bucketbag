@@ -17,7 +17,7 @@ your control. Not faster than the raw API (same transport), and not a framework.
 
 ```toml
 # /// script
-# dependencies = ["bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.2.0"]
+# dependencies = ["bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.3.0"]
 # ///
 ```
 
@@ -43,10 +43,16 @@ against memory, or pass `dir=`. One rule: don't keep a `LoadedItem`/`.path` past
 from bucketbag import iter_keys, batched_files, put_files
 
 done = {k.removesuffix(".md") for k in iter_keys(OUT, include="**/*.md")}
-keys = [k for k in iter_keys(SRC, include="**/*.jp2") if k not in done]
+keys = [k for k in iter_keys(SRC, include="**/*.jp2", objects=True) if k.path not in done]
 for batch in batched_files(SRC, keys=keys, max_bytes=4 * 2**30):
     put_files([(it.key + ".md", ocr(it)) for it in batch], OUT)   # one API call per batch
 ```
+
+`iter_keys(..., objects=True)` yields `BucketFile` objects (with `.size`) instead of key
+strings — pass those to `batched_files(keys=…, max_bytes=…)` so the byte bound can be honored.
+Bare string keys carry no size, so **`max_bytes` + string keys raises `ValueError`** (fail fast
+rather than silently run unbounded against the default RAM-tmpfs scratch — an OOMKill, not a
+disk-full). Let `batched_files` do the listing (omit `keys=`) and it keeps the sizes for you.
 
 Parquet outputs are your tool's job (polars / pyarrow straight to the bucket);
 `completed_keys(OUT)` reads a done-set back from a `__source_key` column (pyarrow in *your* deps).

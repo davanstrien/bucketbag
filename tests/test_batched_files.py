@@ -13,13 +13,11 @@ regular regression tests.
 
 from __future__ import annotations
 
-import logging
-
 import pytest
-from conftest import bfiles, count_bb_dirs, make_fake_download
+from conftest import bf, bfiles, count_bb_dirs, make_fake_download
 from huggingface_hub import BucketFile, HfApi
 
-from bucketbag import batched_files
+from bucketbag import batched_files, iter_keys
 
 
 # --------------------------------------------------------------------------- #
@@ -116,13 +114,60 @@ def test_empty_keys_yields_nothing(fake_download, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_string_keys_warn_and_ignore_max_bytes(fake_download, tmp_path, caplog):
-    # string keys -> sizes unknown -> max_bytes is ignored (with a warning) and only `n` binds.
+# --------------------------------------------------------------------------- #
+# max_bytes + string keys: the bound can't be honored, so we fail fast.
+# String keys carry no size; the old warn-and-drop behaviour ran the loop
+# unbounded — against the default RAM-tmpfs scratch dir that is an OOMKill, not
+# a disk-full. A caller who asked for a bound should not get an unbounded loop.
+# --------------------------------------------------------------------------- #
+def test_string_keys_with_max_bytes_raises(fake_download, tmp_path):
     keys = [f"k{i}" for i in range(4)]
-    with caplog.at_level(logging.WARNING, logger="bucketbag"):
-        batches = list(
-            batched_files("ns/bucket", keys=keys, n=2, max_bytes=1, prefetch=0, dir=tmp_path)
-        )
+    with pytest.raises(ValueError, match="max_bytes requires sized keys"):
+        list(batched_files("ns/bucket", keys=keys, max_bytes=1, prefetch=0, dir=tmp_path))
+    assert count_bb_dirs(tmp_path) == 0
+
+
+def test_mixed_keys_with_max_bytes_raises(fake_download, tmp_path):
+    # A BucketFile at index 0 must not let a stray string sneak through: every key must be
+    # sized when max_bytes is set (else _pack treats the unsized one as size 0).
+    keys = [BucketFile(type="file", path="k0", size=10, xetHash=""), "k1"]
+    with pytest.raises(ValueError, match="max_bytes requires sized keys"):
+        list(batched_files("ns/bucket", keys=keys, max_bytes=100, prefetch=0, dir=tmp_path))
+    assert count_bb_dirs(tmp_path) == 0
+
+
+def test_string_keys_without_max_bytes_ok(fake_download, tmp_path):
+    # Strings with a count cap only (no max_bytes) is a legitimate path and must still work.
+    keys = [f"k{i}" for i in range(4)]
+    batches = list(batched_files("ns/bucket", keys=keys, n=2, prefetch=0, dir=tmp_path))
     assert [[it.key for it in b] for b in batches] == [["k0", "k1"], ["k2", "k3"]]
-    assert any("max_bytes ignored" in r.message for r in caplog.records)
+    assert count_bb_dirs(tmp_path) == 0
+
+
+def test_resume_composition_honors_max_bytes(monkeypatch, tmp_path):
+    # The README "Writing + resume" shape: iter_keys(objects=True) -> filter done -> batched_files.
+    # Regression test for the issue itself: max_bytes must be honored end to end, not dropped.
+    SRC, OUT = "ns/src", "ns/out"
+
+    def fake_list(self, bucket_id, *, prefix=None, recursive=False, **kwargs):  # noqa: ANN001
+        if bucket_id == SRC:
+            return [bf(f"{i}.jp2", size=10) for i in range(4)]  # 0..3, 10 bytes each
+        if bucket_id == OUT:
+            return [bf("0.md", size=1), bf("1.md", size=1)]  # 0 and 1 already done
+        return []
+
+    monkeypatch.setattr(HfApi, "list_bucket_tree", fake_list)
+    monkeypatch.setattr(HfApi, "download_bucket_files", make_fake_download())
+
+    done = {k.removesuffix(".md") for k in iter_keys(OUT, include="**/*.md")}
+    keys = [
+        k
+        for k in iter_keys(SRC, include="**/*.jp2", objects=True)
+        if k.path.removesuffix(".jp2") not in done
+    ]
+    # Resume dropped 0 and 1; what's left is sized, so max_bytes binds.
+    assert [k.path for k in keys] == ["2.jp2", "3.jp2"]
+    batches = list(batched_files(SRC, keys=keys, max_bytes=15, prefetch=0, dir=tmp_path))
+    # 10 + 10 = 20 > 15, so they split — max_bytes is honored, not silently dropped.
+    assert [[it.key for it in b] for b in batches] == [["2.jp2"], ["3.jp2"]]
     assert count_bb_dirs(tmp_path) == 0
