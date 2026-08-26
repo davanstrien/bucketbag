@@ -87,8 +87,9 @@ runs in-process today; fanning the same plan across HF Jobs (one shard per job) 
 `bucket` = `"ns/bucket"`, `"ns/bucket/prefix"`, or `"hf://buckets/ns/bucket/prefix"`.
 Globs: `*` within a path segment, `**` across `/`.
 `prefix` is a string prefix and the trailing slash matters: `prefix="a/b/"` lists the
-directory `a/b` only; `prefix="a/b"` also matches siblings like `a/bc/y`. (The Hub API
-ignores the slash, so bucketbag filters client-side — since 0.3.1.)
+directory `a/b` only; `prefix="a/b"` also matches siblings like `a/bc/y`. (The Hub honors the
+slash on the first page of a listing but its pagination links drop it, so bucketbag re-applies
+the prefix client-side — since 0.3.1.)
 
 ## Performance
 

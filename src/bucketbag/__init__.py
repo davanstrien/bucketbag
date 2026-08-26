@@ -241,10 +241,12 @@ def _list_bucketfiles(
 ) -> list[BucketFile]:
     """List a bucket prefix, filter by glob / cursor, return sorted ``BucketFile`` objects.
 
-    ``prefix`` is applied **client-side as a string prefix, trailing slash preserved**. The Hub's
-    ``list_bucket_tree(prefix=)`` ignores a trailing slash (``"a/b/"`` also returns ``a/bc/y``),
-    so the server call only narrows the listing; the ``startswith`` filter below is what makes
-    ``"a/b/"`` mean "the directory ``a/b``" rather than "every key starting with ``a/b``".
+    ``prefix`` is sent to the Hub verbatim (trailing slash included) **and** re-applied
+    client-side with ``startswith``. The Hub's recursive listing is a raw string-prefix range
+    query, so the slash is honored on the first page — but the ``Link: rel="next"`` URL carries
+    a literal ``/`` that a 302 strips, and every later page reverts to slash-less matching
+    (``"a/b/"`` then also yields ``a/bc/y``). Any listing over one page (1000 keys) needs the
+    client filter to make ``"a/b/"`` mean "the directory ``a/b``".
     """
     list_prefix = prefix
     if list_prefix is None and include:
@@ -253,14 +255,13 @@ def _list_bucketfiles(
     exc = _glob_to_re(exclude) if exclude else None
 
     api = HfApi(token=token)
-    api_prefix = list_prefix.rstrip("/") if list_prefix else None
     found: list[BucketFile] = []
-    for item in api.list_bucket_tree(bucket_id, prefix=api_prefix or None, recursive=True):
+    for item in api.list_bucket_tree(bucket_id, prefix=list_prefix or None, recursive=True):
         if getattr(item, "type", None) != "file":
             continue
         key = item.path
         if list_prefix and not key.startswith(list_prefix):
-            continue  # server-side prefix over-matches siblings (a/b/ -> a/bc/); see docstring
+            continue  # pages after the first over-match siblings (a/b/ -> a/bc/); see docstring
         if inc is not None and not inc.match(key):
             continue
         if exc is not None and exc.match(key):
@@ -541,7 +542,7 @@ def completed_keys(
         if getattr(item, "type", None) != "file" or not item.path.endswith(".parquet"):
             continue
         if list_prefix and not item.path.startswith(list_prefix):
-            continue  # server-side prefix over-matches siblings; see _list_bucketfiles
+            continue  # pages after the first over-match siblings; see _list_bucketfiles
         full = f"{_BUCKET_PREFIX}{bucket_id}/{item.path}"
         try:
             with fs.open(full, "rb") as fh:
