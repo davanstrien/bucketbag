@@ -79,13 +79,17 @@ runs in-process today; fanning the same plan across HF Jobs (one shard per job) 
 | `batched_files(bucket, *, keys, include, exclude, n=20, max_bytes, dir, prefetch=2, ...)` | download batches → yield `list[LoadedItem]` → auto-delete |
 | `iter_keys(bucket, *, prefix, include, exclude, start_after, limit, token)` | list + glob-filter + sort keys (no download) |
 | `put_files(pairs, out_bucket)` / `put_bytes` / `put_text` | write raw objects; `put_files` batches many per call |
-| `completed_keys(out_bucket, *, column="__source_key")` | done-set from parquet outputs |
+| `completed_keys(out_bucket, *, prefix, column="__source_key")` | done-set from parquet outputs |
 | `boost(*, file_concurrency=32)` | raise xet download concurrency (~2.5× on small files) |
 | `LoadedItem` | `.key` `.path` + lazy `.bytes` `.image` `.text()` `.json()` |
 | `Bag.from_bucket(...).map_batches(fn).to_bucket(out)` + `.take(n)` / `.compute()` | the loop as a lazy plan |
 
 `bucket` = `"ns/bucket"`, `"ns/bucket/prefix"`, or `"hf://buckets/ns/bucket/prefix"`.
 Globs: `*` within a path segment, `**` across `/`.
+`prefix` is a string prefix and the trailing slash matters: `prefix="a/b/"` lists the
+directory `a/b` only; `prefix="a/b"` also matches siblings like `a/bc/y`. (The Hub honors the
+slash on the first page of a listing but its pagination links drop it, so bucketbag re-applies
+the prefix client-side — since 0.3.1.)
 
 ## Performance
 

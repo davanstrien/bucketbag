@@ -239,7 +239,15 @@ def _list_bucketfiles(
     limit: int | None,
     token: str | bool | None,
 ) -> list[BucketFile]:
-    """List a bucket prefix, filter by glob / cursor, return sorted ``BucketFile`` objects."""
+    """List a bucket prefix, filter by glob / cursor, return sorted ``BucketFile`` objects.
+
+    ``prefix`` is sent to the Hub verbatim (trailing slash included) **and** re-applied
+    client-side with ``startswith``. The Hub's recursive listing is a raw string-prefix range
+    query, so the slash is honored on the first page — but the ``Link: rel="next"`` URL carries
+    a literal ``/`` that a 302 strips, and every later page reverts to slash-less matching
+    (``"a/b/"`` then also yields ``a/bc/y``). Any listing over one page (1000 keys) needs the
+    client filter to make ``"a/b/"`` mean "the directory ``a/b``".
+    """
     list_prefix = prefix
     if list_prefix is None and include:
         list_prefix = _glob_prefix(include) or None
@@ -247,12 +255,13 @@ def _list_bucketfiles(
     exc = _glob_to_re(exclude) if exclude else None
 
     api = HfApi(token=token)
-    api_prefix = list_prefix.rstrip("/") if list_prefix else None
     found: list[BucketFile] = []
-    for item in api.list_bucket_tree(bucket_id, prefix=api_prefix or None, recursive=True):
+    for item in api.list_bucket_tree(bucket_id, prefix=list_prefix or None, recursive=True):
         if getattr(item, "type", None) != "file":
             continue
         key = item.path
+        if list_prefix and not key.startswith(list_prefix):
+            continue  # pages after the first over-match siblings (a/b/ -> a/bc/); see docstring
         if inc is not None and not inc.match(key):
             continue
         if exc is not None and exc.match(key):
@@ -284,8 +293,10 @@ def iter_keys(
 
     Args:
         bucket: ``"ns/bucket"`` (optionally with a prefix, or an ``hf://buckets/...`` URL).
-        prefix: server-side list prefix; if omitted it is derived from the literal head of
-            ``include`` so you only list what you need.
+        prefix: string prefix keys must start with (``key.startswith(prefix)``). A trailing
+            ``/`` is significant: ``"a/b/"`` lists the directory ``a/b`` only, while ``"a/b"``
+            also matches siblings such as ``a/bc/y``. If omitted it is derived from the literal
+            head of ``include`` so you only list what you need.
         include / exclude: glob patterns matched against the full key (``**`` crosses ``/``).
         start_after: skip keys ``<= start_after`` (a cheap cursor to start mid-corpus).
         limit: cap the number of keys returned.
@@ -380,6 +391,9 @@ def batched_files(
         keys: explicit keys to fetch; if omitted the bucket is listed (``prefix``/``include``/
             ``exclude``/``start_after``/``limit`` apply). Useful for resume: filter out
             :func:`completed_keys` first.
+        prefix: string prefix keys must start with; a trailing ``/`` means "this directory"
+            (``"a/b/"`` excludes the sibling ``a/bc/``), no slash keeps plain string-prefix
+            semantics. See :func:`iter_keys`.
         n: max files per batch (``None`` = no count cap; pair with ``max_bytes`` for pure
             size-based batching).
         max_bytes: max total bytes per batch. A single file larger than this forms its own batch.
@@ -504,6 +518,9 @@ def completed_keys(
 
     Reads only ``column`` from every ``.parquet`` object under ``prefix`` in ``out_bucket``.
     Returns an empty set if nothing is there yet.
+
+    ``prefix`` is a string prefix with a significant trailing ``/``: ``"out/run1/"`` scans that
+    directory only, ``"out/run1"`` also scans a sibling ``out/run10/`` (see :func:`iter_keys`).
     """
     try:
         import pyarrow.parquet as pq
@@ -524,6 +541,8 @@ def completed_keys(
     for item in api.list_bucket_tree(bucket_id, prefix=list_prefix or None, recursive=True):
         if getattr(item, "type", None) != "file" or not item.path.endswith(".parquet"):
             continue
+        if list_prefix and not item.path.startswith(list_prefix):
+            continue  # pages after the first over-match siblings; see _list_bucketfiles
         full = f"{_BUCKET_PREFIX}{bucket_id}/{item.path}"
         try:
             with fs.open(full, "rb") as fh:
