@@ -106,6 +106,16 @@ Competitive with the raw API by design; the win is the interface. The one real t
 xet's concurrent-file cap (default 8) — `boost()` raises it, ~2.5× on small files. Skip it for
 large files (over-subscription).
 
+### Decode, not transport
+
+Before tuning transport, time decode on its own (`examples/decode_probe.py`). On BHL pages
+(~4300×5500 px jp2, ~0.7 MB, cpu-basic): `batched_files` downloads 40 files in ~1 s; full-resolution
+Pillow decode of the same 40 takes ~70 s. Pillow's JPEG 2000 decoder holds the GIL — 8 threads
+gave 2.3 s/img vs 2.4 single-threaded; 8 processes gave 0.5. Decoding at a JPEG 2000 `reduce`
+level is the real lever: `reduce=3` (~520×690 out) is ~0.06 s/img. Pillow fails `reduce>=2`
+("broken data stream") whenever `int((d + p/2) / p) != ceil(d / p)` for either dimension —
+`safe_reduce()` in the example picks the largest level that loads.
+
 ## Not in scope
 
 DAGs, shuffles, custom formats, return values to a driver. Stages couple through bucket keys; a
