@@ -9,7 +9,7 @@ authors = [{ name = "Daniel van Strien" }]
 keywords = ["huggingface", "buckets", "batch", "toolz", "dataset"]
 dependencies = [
     "huggingface-hub>=1.12",
-    "hf-xet",
+    "hf-xet>=1.5.2",
     "toolz",
     "pillow",
 ]

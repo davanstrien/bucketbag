@@ -106,6 +106,21 @@ Competitive with the raw API by design; the win is the interface. The one real t
 xet's concurrent-file cap (default 8) — `boost()` raises it, ~2.5× on small files. Skip it for
 large files (over-subscription).
 
+### Decode, not transport
+
+If a pipeline is slow, time the download and the decode separately before tuning transport
+(`examples/decode_probe.py` does this). The transport is usually not the gate: on ~0.7 MB page
+images, `batched_files` moves 40 files in ~1 s, and decoding those 40 takes ~70 s. Three things
+to check in the decode step:
+
+- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does): 8 threads gave the
+  same speed as 1. A process pool did scale.
+- **Decode smaller.** Formats with resolution levels (JPEG 2000: `im.reduce`; JPEG: `im.draft()`)
+  can decode at 1/4 or 1/8 the pixels for a fraction of the time — usually all a classifier needs.
+- **Check the reduced size loads.** Pillow's JPEG 2000 `reduce>=2` fails with "broken data stream"
+  when its size rounding disagrees with OpenJPEG's; `safe_reduce()` in the example picks the
+  largest level that loads.
+
 ## Not in scope
 
 DAGs, shuffles, custom formats, return values to a driver. Stages couple through bucket keys; a
