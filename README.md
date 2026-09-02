@@ -108,13 +108,18 @@ large files (over-subscription).
 
 ### Decode, not transport
 
-Before tuning transport, time decode on its own (`examples/decode_probe.py`). On BHL pages
-(~4300×5500 px jp2, ~0.7 MB, cpu-basic): `batched_files` downloads 40 files in ~1 s; full-resolution
-Pillow decode of the same 40 takes ~70 s. Pillow's JPEG 2000 decoder holds the GIL — 8 threads
-gave 2.3 s/img vs 2.4 single-threaded; 8 processes gave 0.5. Decoding at a JPEG 2000 `reduce`
-level is the real lever: `reduce=3` (~520×690 out) is ~0.06 s/img. Pillow fails `reduce>=2`
-("broken data stream") whenever `int((d + p/2) / p) != ceil(d / p)` for either dimension —
-`safe_reduce()` in the example picks the largest level that loads.
+If a pipeline is slow, time the download and the decode separately before tuning transport
+(`examples/decode_probe.py` does this). The transport is usually not the gate: on ~0.7 MB page
+images, `batched_files` moves 40 files in ~1 s, and decoding those 40 takes ~70 s. Three things
+to check in the decode step:
+
+- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does): 8 threads gave the
+  same speed as 1. A process pool did scale.
+- **Decode smaller.** Formats with resolution levels (JPEG 2000: `im.reduce`; JPEG: `im.draft()`)
+  can decode at 1/4 or 1/8 the pixels for a fraction of the time — usually all a classifier needs.
+- **Check the reduced size loads.** Pillow's JPEG 2000 `reduce>=2` fails with "broken data stream"
+  when its size rounding disagrees with OpenJPEG's; `safe_reduce()` in the example picks the
+  largest level that loads.
 
 ## Not in scope
 
