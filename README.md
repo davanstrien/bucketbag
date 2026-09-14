@@ -88,7 +88,8 @@ runs in-process today; fanning the same plan across HF Jobs (one shard per job) 
 Globs: `*` within a path segment, `**` across `/`.
 `prefix` is a string prefix and the trailing slash matters: `prefix="a/b/"` lists the
 directory `a/b` only; `prefix="a/b"` also matches siblings like `a/bc/y`. The prefix is sent
-verbatim to the Hub, which preserves it across listing pages.
+verbatim to the Hub. Bucketbag also checks each returned key against it as a cheap safeguard
+against over-matching listings, including pagination regressions.
 
 ## Performance
 

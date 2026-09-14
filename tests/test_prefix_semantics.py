@@ -1,8 +1,9 @@
-"""Regression tests for directory and string-prefix semantics.
+"""Regression tests for prefix directory semantics under over-matching listings.
 
-The Hub preserves a trailing slash across recursive listing pages. These offline tests fake
-that API contract and check that bucketbag forwards prefixes verbatim for listing, batching
-and resume scans.
+The Hub previously lost a trailing slash after the first page of a recursive listing.
+The server bug is fixed, but the adversarial fake remains: bucketbag must keep results
+within the caller's original prefix even if an upstream listing over-matches again.
+Directory assertions therefore fail if the client-side guards are removed.
 """
 
 from __future__ import annotations
@@ -17,21 +18,51 @@ from huggingface_hub import HfApi
 
 from bucketbag import batched_files, completed_keys, iter_keys
 
+PAGE = 2  # fake page size; the real Hub pages at 1000
 TREE = ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y", "a/c/z"]
 A_B = ["a/b/x1", "a/b/x2", "a/b/x3"]
 
 
+def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> list[str]:
+    """Reproduce the historical paginated over-match observed on 2026-08-26.
+
+    Page 1 honors the trailing slash. Later pages simulate a next-link redirect losing
+    it, so the listing spills into sibling directories. Retained as an adversarial
+    regression case, independently of the current server implementation.
+    """
+    keys = sorted(keys)
+    first = [k for k in keys if k.startswith(prefix or "")][:page]
+    if len(first) < page:
+        return first
+    head = (prefix or "").rstrip("/")
+    rest = [k for k in keys if k.startswith(head) and k > first[-1]]
+    return first + rest
+
+
 @pytest.fixture
 def fake_tree(monkeypatch):
-    """Fake prefix-scoped listings and record the exact prefixes sent to the Hub."""
+    """Fake ``list_bucket_tree`` with adversarial pagination (``hub_like_listing``).
+
+    Returns the list of ``prefix`` values the server was called with, so tests can also check
+    the prefix reaches the server verbatim (slash preserved) and the call stays narrow.
+    """
     calls: list[str | None] = []
 
     def fake(self, bucket_id, *, prefix=None, recursive=False, **kwargs):  # noqa: ANN001
         calls.append(prefix)
-        return [bf(p, size=5) for p in sorted(TREE) if p.startswith(prefix or "")]
+        return [bf(p, size=5) for p in hub_like_listing(TREE, prefix)]
 
     monkeypatch.setattr(HfApi, "list_bucket_tree", fake)
     return calls
+
+
+# --- sanity: the fake reproduces the historical over-match past page 1 -------------------
+
+
+def test_fake_server_over_matches_after_first_page():
+    assert hub_like_listing(TREE, "a/b/") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
+    assert hub_like_listing(TREE, "a/b/", page=10) == A_B  # single page: slash honored
+    assert hub_like_listing(TREE, "a/b") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
 
 
 # --- iter_keys --------------------------------------------------------------------------
@@ -39,7 +70,7 @@ def fake_tree(monkeypatch):
 
 def test_iter_keys_trailing_slash_means_directory(fake_tree):
     assert list(iter_keys("ns/b", prefix="a/b/")) == A_B
-    # The prefix reaches the server verbatim, including the trailing slash.
+    # The prefix reaches the server verbatim (slash kept) so page 1 is narrowed correctly.
     assert fake_tree == ["a/b/"]
 
 
@@ -125,7 +156,7 @@ def fake_parquet_tree(monkeypatch):
     shards = ["out/r1/0.parquet", "out/r1/1.parquet", "out/r1/2.parquet", "out/r10/0.parquet"]
 
     def fake(self, bucket_id, *, prefix=None, recursive=False, **kwargs):  # noqa: ANN001
-        return [bf(p, size=5) for p in sorted(shards) if p.startswith(prefix or "")]
+        return [bf(p, size=5) for p in hub_like_listing(shards, prefix)]
 
     monkeypatch.setattr(HfApi, "list_bucket_tree", fake)
 

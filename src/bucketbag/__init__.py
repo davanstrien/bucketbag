@@ -241,8 +241,9 @@ def _list_bucketfiles(
 ) -> list[BucketFile]:
     """List a bucket prefix, filter by glob / cursor, return sorted ``BucketFile`` objects.
 
-    ``prefix`` is sent to the Hub verbatim, including a significant trailing slash.
-    The Hub applies that prefix across every page of the listing.
+    ``prefix`` is sent to the Hub verbatim, including a significant trailing slash,
+    and checked client-side. The guard keeps results within the requested prefix even
+    if an upstream listing over-matches.
     """
     list_prefix = prefix
     if list_prefix is None and include:
@@ -256,6 +257,8 @@ def _list_bucketfiles(
         if getattr(item, "type", None) != "file":
             continue
         key = item.path
+        if list_prefix and not key.startswith(list_prefix):
+            continue  # Defend against over-matching listings, including pagination regressions.
         if inc is not None and not inc.match(key):
             continue
         if exc is not None and exc.match(key):
@@ -535,6 +538,8 @@ def completed_keys(
     for item in api.list_bucket_tree(bucket_id, prefix=list_prefix or None, recursive=True):
         if getattr(item, "type", None) != "file" or not item.path.endswith(".parquet"):
             continue
+        if list_prefix and not item.path.startswith(list_prefix):
+            continue  # Never treat sibling-run shards as completed work.
         full = f"{_BUCKET_PREFIX}{bucket_id}/{item.path}"
         try:
             with fs.open(full, "rb") as fh:
