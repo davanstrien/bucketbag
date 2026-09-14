@@ -1,14 +1,8 @@
-"""Regression tests for ``prefix`` directory semantics (0.3.1).
+"""Regression tests for directory and string-prefix semantics.
 
-The Hub honors a trailing slash on the first page of a recursive listing, but its ``Link: next``
-URL carries a literal ``/`` that a 302 strips, so later pages match on the slash-less string
-prefix: ``prefix="a/b/"`` returns ``a/bc/y`` as well as ``a/b/x`` once the listing exceeds one
-page. bucketbag sends the prefix verbatim *and* re-filters client-side with the caller's
-original prefix, so a trailing ``/`` means "this directory" regardless of listing size.
-
-Offline: ``HfApi.list_bucket_tree`` is replaced with a fake that reproduces that paginated
-behaviour (``hub_like_listing``), so the tests are non-vacuous — without the client-side filter
-every "directory" assertion below fails.
+The Hub preserves a trailing slash across recursive listing pages. These offline tests fake
+that API contract and check that bucketbag forwards prefixes verbatim for listing, batching
+and resume scans.
 """
 
 from __future__ import annotations
@@ -23,52 +17,21 @@ from huggingface_hub import HfApi
 
 from bucketbag import batched_files, completed_keys, iter_keys
 
-PAGE = 2  # fake page size; the real Hub pages at 1000
 TREE = ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y", "a/c/z"]
 A_B = ["a/b/x1", "a/b/x2", "a/b/x3"]
 
 
-def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> list[str]:
-    """Reproduce ``GET /api/buckets/.../tree/<prefix>?recursive=true`` + ``Link: next`` paging.
-
-    Page 1 is a raw string-prefix range query, trailing slash honored. The ``next`` link carries
-    a literal ``/`` that the Hub 302-redirects to the slash-less path, so every later page
-    matches on ``prefix.rstrip("/")`` — verified against prod on 2026-08-26 (biglam/britannica,
-    ``source/pages/encyclopdiabri01chis/``: page 1 clean, page 2 crosses into ``...chisrich/``).
-    """
-    keys = sorted(keys)
-    first = [k for k in keys if k.startswith(prefix or "")][:page]
-    if len(first) < page:
-        return first
-    head = (prefix or "").rstrip("/")
-    rest = [k for k in keys if k.startswith(head) and k > first[-1]]
-    return first + rest
-
-
 @pytest.fixture
 def fake_tree(monkeypatch):
-    """Fake ``list_bucket_tree`` with the Hub's real paginated semantics (``hub_like_listing``).
-
-    Returns the list of ``prefix`` values the server was called with, so tests can also check
-    the prefix reaches the server verbatim (slash preserved) and the call stays narrow.
-    """
+    """Fake prefix-scoped listings and record the exact prefixes sent to the Hub."""
     calls: list[str | None] = []
 
     def fake(self, bucket_id, *, prefix=None, recursive=False, **kwargs):  # noqa: ANN001
         calls.append(prefix)
-        return [bf(p, size=5) for p in hub_like_listing(TREE, prefix)]
+        return [bf(p, size=5) for p in sorted(TREE) if p.startswith(prefix or "")]
 
     monkeypatch.setattr(HfApi, "list_bucket_tree", fake)
     return calls
-
-
-# --- sanity: the fake really over-matches past page 1, like the Hub does --------------------
-
-
-def test_fake_server_over_matches_after_first_page():
-    assert hub_like_listing(TREE, "a/b/") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
-    assert hub_like_listing(TREE, "a/b/", page=10) == A_B  # single page: slash honored
-    assert hub_like_listing(TREE, "a/b") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
 
 
 # --- iter_keys --------------------------------------------------------------------------
@@ -76,7 +39,7 @@ def test_fake_server_over_matches_after_first_page():
 
 def test_iter_keys_trailing_slash_means_directory(fake_tree):
     assert list(iter_keys("ns/b", prefix="a/b/")) == A_B
-    # The prefix reaches the server verbatim (slash kept) so page 1 is narrowed correctly.
+    # The prefix reaches the server verbatim, including the trailing slash.
     assert fake_tree == ["a/b/"]
 
 
@@ -162,7 +125,7 @@ def fake_parquet_tree(monkeypatch):
     shards = ["out/r1/0.parquet", "out/r1/1.parquet", "out/r1/2.parquet", "out/r10/0.parquet"]
 
     def fake(self, bucket_id, *, prefix=None, recursive=False, **kwargs):  # noqa: ANN001
-        return [bf(p, size=5) for p in hub_like_listing(shards, prefix)]
+        return [bf(p, size=5) for p in sorted(shards) if p.startswith(prefix or "")]
 
     monkeypatch.setattr(HfApi, "list_bucket_tree", fake)
 

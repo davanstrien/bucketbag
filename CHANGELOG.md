@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Remove the client-side prefix filtering workaround from `iter_keys`, `batched_files` and
+  `completed_keys` now that Hub pagination preserves trailing slashes. Prefixes are still sent
+  verbatim; directory and string-prefix semantics are unchanged.
+
 ## 0.3.1 — 2026-08-26
 
 - Fix: `prefix` over-matched sibling directories in `iter_keys`, `batched_files` and
