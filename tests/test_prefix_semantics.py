@@ -26,6 +26,8 @@ A_B = ["a/b/x1", "a/b/x2", "a/b/x3"]
 def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> list[str]:
     """Reproduce the historical paginated over-match observed on 2026-08-26.
 
+    Original repro: ``biglam/britannica``, prefix ``source/pages/encyclopdiabri01chis/``.
+
     Page 1 honors the trailing slash. Later pages simulate a next-link redirect losing
     it, so the listing spills into sibling directories. Retained as an adversarial
     regression case, independently of the current server implementation.
