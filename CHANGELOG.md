@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Refresh prefix-listing documentation after the Hub pagination fix. Retain the client-side
+  prefix guards and adversarial regression tests as safeguards against over-matching listings;
+  runtime behaviour is unchanged.
+
 ## 0.3.1 — 2026-08-26
 
 - Fix: `prefix` over-matched sibling directories in `iter_keys`, `batched_files` and

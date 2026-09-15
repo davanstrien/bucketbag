@@ -1,14 +1,9 @@
-"""Regression tests for ``prefix`` directory semantics (0.3.1).
+"""Regression tests for prefix directory semantics under over-matching listings.
 
-The Hub honors a trailing slash on the first page of a recursive listing, but its ``Link: next``
-URL carries a literal ``/`` that a 302 strips, so later pages match on the slash-less string
-prefix: ``prefix="a/b/"`` returns ``a/bc/y`` as well as ``a/b/x`` once the listing exceeds one
-page. bucketbag sends the prefix verbatim *and* re-filters client-side with the caller's
-original prefix, so a trailing ``/`` means "this directory" regardless of listing size.
-
-Offline: ``HfApi.list_bucket_tree`` is replaced with a fake that reproduces that paginated
-behaviour (``hub_like_listing``), so the tests are non-vacuous — without the client-side filter
-every "directory" assertion below fails.
+The Hub previously lost a trailing slash after the first page of a recursive listing.
+The server bug is fixed, but the adversarial fake remains: bucketbag must keep results
+within the caller's original prefix even if an upstream listing over-matches again.
+Directory assertions therefore fail if the client-side guards are removed.
 """
 
 from __future__ import annotations
@@ -29,12 +24,13 @@ A_B = ["a/b/x1", "a/b/x2", "a/b/x3"]
 
 
 def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> list[str]:
-    """Reproduce ``GET /api/buckets/.../tree/<prefix>?recursive=true`` + ``Link: next`` paging.
+    """Reproduce the historical paginated over-match observed on 2026-08-26.
 
-    Page 1 is a raw string-prefix range query, trailing slash honored. The ``next`` link carries
-    a literal ``/`` that the Hub 302-redirects to the slash-less path, so every later page
-    matches on ``prefix.rstrip("/")`` — verified against prod on 2026-08-26 (biglam/britannica,
-    ``source/pages/encyclopdiabri01chis/``: page 1 clean, page 2 crosses into ``...chisrich/``).
+    Original repro: ``biglam/britannica``, prefix ``source/pages/encyclopdiabri01chis/``.
+
+    Page 1 honors the trailing slash. Later pages simulate a next-link redirect losing
+    it, so the listing spills into sibling directories. Retained as an adversarial
+    regression case, independently of the current server implementation.
     """
     keys = sorted(keys)
     first = [k for k in keys if k.startswith(prefix or "")][:page]
@@ -47,7 +43,7 @@ def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> l
 
 @pytest.fixture
 def fake_tree(monkeypatch):
-    """Fake ``list_bucket_tree`` with the Hub's real paginated semantics (``hub_like_listing``).
+    """Fake ``list_bucket_tree`` with adversarial pagination (``hub_like_listing``).
 
     Returns the list of ``prefix`` values the server was called with, so tests can also check
     the prefix reaches the server verbatim (slash preserved) and the call stays narrow.
@@ -62,7 +58,7 @@ def fake_tree(monkeypatch):
     return calls
 
 
-# --- sanity: the fake really over-matches past page 1, like the Hub does --------------------
+# --- sanity: the fake reproduces the historical over-match past page 1 -------------------
 
 
 def test_fake_server_over_matches_after_first_page():
