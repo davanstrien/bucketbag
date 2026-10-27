@@ -35,6 +35,13 @@ select = ["E", "F", "I", "UP", "B"]
 # experiments vendor engine code from uv-scripts-for-ai recipes unchanged
 "experiments/**" = ["B905"]
 
+[tool.ty.src]
+include = ["src"]
+
+[tool.ty.analysis]
+# pyarrow is an optional import in completed_keys, not a bucketbag dependency.
+allowed-unresolved-imports = ["pyarrow.**"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
@@ -44,6 +51,7 @@ dev = [
     "hypothesis>=6.155.7",
     "pytest>=9.1.1",
     "ruff>=0.15",
+    "ty>=0.0.91",
 ]
 
 # Pin the index to public PyPI so the lockfile resolves against the canonical registry,

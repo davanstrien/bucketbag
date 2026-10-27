@@ -37,5 +37,8 @@ jobs:
       - name: Ruff
         run: uv run --no-sync ruff check .
 
+      - name: Type check
+        run: uv run --no-sync ty check
+
       - name: Pytest
         run: uv run --no-sync pytest
