@@ -24,6 +24,7 @@ plain ``for`` loops and ``toolz``.
 
 from __future__ import annotations
 
+import builtins
 import json as _json
 import logging
 import os
@@ -31,11 +32,14 @@ import re
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, overload
+
+if TYPE_CHECKING:
+    from PIL.Image import Image
 
 # Enable xet high-performance mode before huggingface_hub imports (env is read at import time).
 # This is the documented, safe transport boost. The big lever for many-small-files throughput —
@@ -60,7 +64,7 @@ __all__ = [
     "partition_all",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 logger = logging.getLogger("bucketbag")
 
@@ -195,17 +199,18 @@ class LoadedItem:
 
     key: str
     path: Path
-    _bytes: bytes | None = field(default=None, init=False, repr=False, compare=False)
+    # `builtins.bytes`: the `bytes` property below shadows the builtin inside the class body.
+    _bytes: builtins.bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
-    def bytes(self) -> bytes:
+    def bytes(self) -> builtins.bytes:
         """Raw file bytes (read from disk once, then cached)."""
         if self._bytes is None:
             self._bytes = self.path.read_bytes()
         return self._bytes
 
     @property
-    def image(self):
+    def image(self) -> Image:
         """Lazily open the file as a ``PIL.Image`` (raises if the bytes aren't an image).
 
         Each access re-opens the file, and ``Image.open`` is itself lazy — **decode (or
@@ -254,8 +259,8 @@ def _list_bucketfiles(
     api = HfApi(token=token)
     found: list[BucketFile] = []
     for item in api.list_bucket_tree(bucket_id, prefix=list_prefix or None, recursive=True):
-        if getattr(item, "type", None) != "file":
-            continue
+        if not isinstance(item, BucketFile):
+            continue  # Skip BucketFolder entries.
         key = item.path
         if list_prefix and not key.startswith(list_prefix):
             continue  # Defend against over-matching listings, including pagination regressions.
@@ -265,14 +270,44 @@ def _list_bucketfiles(
             continue
         if start_after is not None and key <= start_after:
             continue
-        found.append(item)  # type: ignore[arg-type]
-        # Early-terminate: list_bucket_tree paginates in lexical order, so breaking once we
-        # have `limit` matches is both fast (no full-bucket scan) and stable across runs.
+        found.append(item)
+        # Early-terminate once we have `limit` matches (no full-bucket scan). This relies on
+        # list_bucket_tree paginating in lexical key order, which the Hub does today but does
+        # not document (issue #9). The final sort fixes the order of what was collected; it
+        # cannot add keys the server had not returned yet.
         if limit is not None and len(found) >= limit:
             break
 
     found.sort(key=lambda f: f.path)
     return found
+
+
+@overload
+def iter_keys(
+    bucket: str,
+    *,
+    prefix: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
+    start_after: str | None = None,
+    limit: int | None = None,
+    objects: Literal[False] = False,
+    token: str | bool | None = None,
+) -> Iterator[str]: ...
+
+
+@overload
+def iter_keys(
+    bucket: str,
+    *,
+    prefix: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
+    start_after: str | None = None,
+    limit: int | None = None,
+    objects: Literal[True],
+    token: str | bool | None = None,
+) -> Iterator[BucketFile]: ...
 
 
 def iter_keys(
@@ -285,7 +320,7 @@ def iter_keys(
     limit: int | None = None,
     objects: bool = False,
     token: str | bool | None = None,
-) -> Iterator[BucketFile | str]:
+) -> Iterator[BucketFile] | Iterator[str]:
     """List keys under a bucket prefix, glob-filtered and sorted (deterministic).
 
     Args:
@@ -296,7 +331,10 @@ def iter_keys(
             head of ``include`` so you only list what you need.
         include / exclude: glob patterns matched against the full key (``**`` crosses ``/``).
         start_after: skip keys ``<= start_after`` (a cheap cursor to start mid-corpus).
-        limit: cap the number of keys returned.
+        limit: cap the number of keys returned. Listing stops after the first ``limit``
+            matches in the server's pagination order. The Hub paginates in lexical key order
+            today, so this gives the lexically first ``limit`` keys, but the Hub does not
+            document that order.
         objects: yield :class:`~huggingface_hub.BucketFile` objects (carrying ``.size``)
             instead of key strings. Needed to feed :func:`batched_files` ``keys=`` together
             with ``max_bytes`` — string keys carry no size, so ``max_bytes`` cannot be honored.
@@ -323,7 +361,7 @@ def iter_keys(
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
 def _pack(
-    remotes: list[BucketFile | str], n: int | None, max_bytes: int | None
+    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: int | None
 ) -> Iterator[list[BucketFile | str]]:
     """Group files into batches capped by count (``n``) and/or total bytes (``max_bytes``).
 
@@ -429,7 +467,7 @@ def batched_files(
 
     def _download_chunk(chunk: list[BucketFile | str]) -> tuple[Path, list[LoadedItem]]:
         tmpdir = Path(tempfile.mkdtemp(dir=base_dir, prefix="bb-"))
-        files: list[tuple[BucketFile | str, str]] = []
+        files: list[tuple[str | BucketFile, str | Path]] = []
         items: list[LoadedItem] = []
         for idx, remote in enumerate(chunk):
             key = _key_of(remote)
@@ -567,7 +605,7 @@ def put_files(
     loop) when writing a batch of outputs, e.g. one ``.md`` per processed page.
     """
     bucket_id, embedded_prefix = _parse_bucket(out_bucket)
-    add: list[tuple[bytes, str]] = []
+    add: list[tuple[str | Path | bytes, str]] = []
     for key, content in files:
         data = content.encode(encoding) if isinstance(content, str) else content
         dest = f"{embedded_prefix}/{key}" if embedded_prefix else key
