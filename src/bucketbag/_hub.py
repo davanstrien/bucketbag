@@ -260,15 +260,16 @@ def _download_batch(
 
 
 def _drain(ahead: deque[Future[_Batch]]) -> None:
-    """Delete every queued batch: cancel downloads not started, wait for the rest."""
-    for future in ahead:
-        if future.cancel():
-            continue
-        try:
-            batch = future.result()
-        except BaseException:  # noqa: BLE001 - keep draining; the error in flight still raises
-            continue  # a failed download already removed its own dir
-        shutil.rmtree(batch.tmpdir, ignore_errors=True)
+    """Delete every queued batch: cancel downloads not started, then wait for the rest.
+
+    Cancelling first means no queued download starts while we wait. ``exception()`` waits
+    without raising a worker's error (a failed download already removed its own dir), so a
+    Ctrl-C during the wait still reaches the caller.
+    """
+    running = [future for future in ahead if not future.cancel()]
+    for future in running:
+        if future.exception() is None:
+            shutil.rmtree(future.result().tmpdir, ignore_errors=True)
 
 
 def batched_files(

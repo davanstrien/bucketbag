@@ -34,6 +34,8 @@ the loop body raises, when the caller stops early, and for batches downloaded ah
 At most `prefetch + 1` batches are on disk at once: the one you are processing and `prefetch`
 downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
 always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
+A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
+stay on disk.
 
 "Stops early" means the generator is closed. A `for` loop over `batched_files(...)` closes it
 when the loop ends. A caller that keeps the generator in a variable must call `.close()`
