@@ -20,13 +20,14 @@ import inspect
 import threading
 import warnings
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import pytest
 from huggingface_hub import BucketFile, BucketFolder, HfApi
+from huggingface_hub.errors import EntryNotFoundError
 
 METHODS = ("list_bucket_tree", "download_bucket_files", "batch_bucket_files")
 
@@ -51,7 +52,7 @@ class FakeBucket:
         missing: keys that a listing returns but that are gone by download time. As in the
             hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
             existence check (it downloads by content hash), so what the real hub does then is
-            unverified; the fake raises ``FileNotFoundError``.
+            unverified; the fake raises the hub's ``EntryNotFoundError``.
         overmatch_after_first_page: replay the Hub pagination bug fixed in September 2026.
             After a full first page the trailing slash was lost, so siblings leaked in.
         listing_order: ``"reversed"`` returns keys in reverse order. The Hub does not document
@@ -113,7 +114,7 @@ class FakeBucket:
         *,
         recursive: bool | None = None,
         token: str | bool | None = None,
-    ) -> list[BucketFile | BucketFolder]:
+    ) -> Iterator[BucketFile | BucketFolder]:
         self._count("list")
         self.list_prefixes.append(prefix)
         if not recursive:
@@ -126,7 +127,7 @@ class FakeBucket:
             directories = sorted({str(PurePosixPath(key).parent) for key in keys} - {"."})
             entries += [BucketFolder(type="directory", path=d) for d in directories]
         entries += [self.entry(bucket_id, key) for key in keys]
-        return entries
+        return iter(entries)  # the hub returns a one-pass iterator, not a list
 
     def download_bucket_files(
         self,
@@ -144,7 +145,7 @@ class FakeBucket:
             key = remote.path if isinstance(remote, BucketFile) else remote
             if key in self.missing or key not in data:
                 if raise_on_missing_files or isinstance(remote, BucketFile):
-                    raise FileNotFoundError(key)
+                    raise EntryNotFoundError(f"File '{key}' not found in bucket '{bucket_id}'.")
                 warnings.warn(
                     f"File '{key}' not found in bucket '{bucket_id}'. Skipping.", stacklevel=2
                 )

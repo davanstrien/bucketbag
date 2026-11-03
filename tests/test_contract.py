@@ -76,6 +76,11 @@ def test_globs_match_the_whole_key_from_the_bucket_root(tree: FakeBucket) -> Non
     assert len(list(iter_keys("ns/b", include="**/*.jp2"))) == 4
 
 
+def test_exclude_drops_matching_keys(tree: FakeBucket) -> None:
+    keys = list(iter_keys("ns/b", include="**/*.jp2", exclude="a/bc/**"))
+    assert keys == ["a/b/x.jp2", "a/b/y.jp2", "c.jp2"]
+
+
 def test_listings_return_full_keys_sorted(tree: FakeBucket) -> None:
     tree.listing_order = "reversed"
     assert list(iter_keys("ns/b", prefix="a/")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
@@ -95,7 +100,16 @@ def test_folder_entries_are_skipped(tree: FakeBucket) -> None:
     assert list(iter_keys("ns/b", prefix="a/")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
 
 
-# --- 2. Temporary files: tests/test_batched_files.py covers each prefetch level.
+# --- 2. Temporary files: tests/test_batched_files.py covers each prefetch level -----------
+
+
+def test_a_kept_generator_deletes_its_files_on_close(bucket: FakeBucket, tmp_path: Path) -> None:
+    files = bucket.seed(SRC, PAGES)
+    batches = batched_files(SRC, keys=files, n=1, prefetch=2, dir=tmp_path)
+    next(batches)
+    assert count_bb_dirs(tmp_path) > 0  # the current batch and the lookahead are on disk
+    batches.close()
+    assert count_bb_dirs(tmp_path) == 0
 
 
 # --- 3. Resume ----------------------------------------------------------------------------
@@ -226,6 +240,21 @@ def test_string_key_gone_at_download_is_dropped_from_its_batch(
 # --- 5. Arguments -------------------------------------------------------------------------
 
 
+def test_bag_bounds_each_batch_by_bytes(bucket: FakeBucket, tmp_path: Path) -> None:
+    for i, size in enumerate([3, 3, 3, 9, 3]):
+        bucket.put(SRC, f"pages/p{i}.jp2", b"x" * size)
+    seen: list[list[str]] = []
+
+    def record(items: list[LoadedItem]) -> list[Output]:
+        seen.append([it.key.removeprefix("pages/") for it in items])
+        return upper_md(items)
+
+    run = Bag.from_bucket(SRC).map_batches(record, batch_size=None, max_bytes=6).to_bucket(OUT)
+    run.compute(prefetch=0, dir=tmp_path)
+    # 3+3 fits in 6 bytes; the 9-byte file is larger than the bound, so it is a batch alone.
+    assert seen == [["p0.jp2", "p1.jp2"], ["p2.jp2"], ["p3.jp2"], ["p4.jp2"]]
+
+
 def test_token_reaches_every_hub_call(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.seed(SRC, PAGES[:2])
     run = Bag.from_bucket(SRC, token="hf_test").map_batches(upper_md).to_bucket(OUT)
@@ -262,7 +291,10 @@ def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Pa
     try:
         Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
     except TypeError as error:
+        if "positional argument" not in str(error):
+            raise
         gap(f"fn(items, *, suffix=...) failed: {error}")
+    assert bucket.keys(OUT) == ["pages/p0.jp2.md"]
 
 
 # --- Public names -------------------------------------------------------------------------

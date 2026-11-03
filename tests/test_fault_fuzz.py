@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from conftest import count_bb_dirs
 from fake_bucket import FakeBucket, FaultInjected
+from huggingface_hub.errors import EntryNotFoundError
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -86,7 +87,7 @@ def test_any_failure_cleans_up_and_a_rerun_finishes_exactly_once(
             warnings.simplefilter("ignore")  # the store warns about missing files, as the Hub does
             try:
                 plan.compute(prefetch=prefetch, dir=scratch)
-            except (Boom, FaultInjected, FileNotFoundError):
+            except (Boom, FaultInjected, EntryNotFoundError):
                 pass
         assert count_bb_dirs(Path(scratch)) == 0
         done_after_first_run = len(bucket.keys(OUT))

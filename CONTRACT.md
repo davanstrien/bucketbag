@@ -28,6 +28,10 @@ today's code breaks; its test is a strict xfail until the fix lands.
 the loop body raises, when the caller stops early, and for batches downloaded ahead
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
+"Stops early" means the generator is closed. A `for` loop over `batched_files(...)` closes it
+when the loop ends. A caller that keeps the generator in a variable must call `.close()`
+(or use `contextlib.closing`); until then the current and lookahead batches stay on disk.
+
 ## 3. Resume (`Bag`)
 
 - An input is done when an output key under the `to_bucket` prefix starts with the input's key
@@ -56,12 +60,15 @@ so `compute()` went on, and the missing outputs were redone on the next run.
 A file that is listed but gone by download time: with string keys
 (`batched_files(keys=[...])`) the hub skips it with a warning, and bucketbag leaves it out of
 the batch. `Bag` passes `BucketFile` objects, which the hub downloads by content hash without
-an existence check; what happens then is not verified.
+an existence check. What happens then is not verified live; the hub source suggests the download
+raises (`EntryNotFoundError`) at least when the gone file comes first in the batch.
 
 ## 5. Arguments
 
 - `token=` reaches every hub call.
-- `max_bytes` with string keys raises `ValueError`: string keys carry no size.
+- `batch_size` caps a batch's file count and `max_bytes` its total size; a single file larger
+  than `max_bytes` forms its own batch. `max_bytes` with string keys raises `ValueError`:
+  string keys carry no size.
 - **Gap:** settings that cannot work are not refused. `n=None` with `max_bytes=None` makes one
   batch of every file, and `n=0` yields an empty batch first.
 - The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given.
