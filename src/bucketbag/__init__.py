@@ -48,7 +48,10 @@ from ._hub import (  # noqa: E402
     put_files,
     put_text,
 )
+from ._log import install as _install_log  # noqa: E402
 from .bag import Bag, BagStats  # noqa: E402
+
+_install_log()  # [bucketbag] lines on stderr until the caller configures logging
 
 __all__ = [
     "Bag",

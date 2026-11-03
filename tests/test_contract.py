@@ -522,8 +522,23 @@ def test_progress_is_logged_with_the_time_split(
     with caplog.at_level(logging.INFO, logger="bucketbag"):
         bag().compute(prefetch=0, dir=tmp_path)
     lines = [r.getMessage() for r in caplog.records if "inputs" in r.getMessage()]
-    assert lines[-1].startswith("bucketbag: 6/6 inputs")
+    assert lines[-1].startswith("6/6 inputs")
     assert "download wait" in lines[-1] and "map" in lines[-1]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("batch_size=2" in m and "prefetch=0" in m for m in messages)  # settings at start
+    assert "bound by" in messages[-1]  # the run report at the end
+
+
+def test_logs_reach_stderr_until_the_caller_configures_logging(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = logging.getLogger("bucketbag")
+    monkeypatch.setattr(logging.root, "handlers", [])  # as in a script with no logging setup
+    log.info("hello")
+    assert "[bucketbag] hello" in capsys.readouterr().err
+    monkeypatch.setattr(logging.root, "handlers", [logging.NullHandler()])  # the caller's setup
+    log.info("hello again")
+    assert "hello again" not in capsys.readouterr().err
 
 
 def test_a_too_small_scratch_dir_is_reported(

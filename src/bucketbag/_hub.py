@@ -274,7 +274,8 @@ def _warn_if_scratch_is_small(
     if peak > free:
         logger.warning(
             "Up to %.2f GB of batches can be on %s at once (prefetch + 1 = %d batches), but "
-            "only %.2f GB is free. Lower max_bytes or prefetch, or pass dir= on a larger disk. "
+            "only %.2f GB is free. Lower max_bytes (n or batch_size) or prefetch, or pass dir= "
+            "on a larger disk. "
             "/dev/shm is RAM, so running out there kills the process.",
             peak / 1e9,
             base_dir,

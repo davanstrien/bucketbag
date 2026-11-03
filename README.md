@@ -68,12 +68,14 @@ bag = (Bag.from_bucket(SRC, include="**/*.jp2")
 bag.take(3)        # dev peek: outputs only, nothing written
 stats = bag.compute()  # list -> skip done -> download -> fn -> put_files; kill + re-run safe
 print(stats)  # for example:
-# 476 processed (+24 skipped as done) in 30 batches -> 952 outputs, 3712.4s
+# 476 processed (+24 skipped as done) in 15 batches -> 952 outputs, 3712.4s
 # time: download wait 1%, map 98%, upload 1%; bound by map. The map function is the limit: ...
 ```
 
 `stats.bound_by` (`"download"`, `"map"` or `"upload"`) and `stats.hint` tell a person or an
-agent what to tune next; a progress line with the same split is logged every 30 s.
+agent what to tune next. `compute()` also logs its settings, a progress line every 30 s and the
+same report at the end. They print to stderr as `[bucketbag] …` lines, so they show up in
+`hf jobs logs`, until your script configures logging; then your handlers get them.
 
 Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
 (`pages/p10.md` never marks `pages/p1` done). `compute()`

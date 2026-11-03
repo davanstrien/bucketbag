@@ -45,14 +45,15 @@ Stage = Literal["download", "map", "upload"]
 # What to change when a stage is the limit (BagStats.hint).
 _HINTS: dict[Stage, str] = {
     "download": (
-        "Downloads are the limit: raise prefetch, or call boost() before the first download "
-        "if the files are small."
+        "Downloads are the limit: call boost() before the first download if the files are "
+        "small, or raise prefetch."
     ),
     "map": (
-        "The map function is the limit: time decoding and the model separately (README: "
-        "'Decode, not transport'), then decode in a process pool or at a smaller size."
+        "The map function is the limit: raise batch_size if the model is under-filled, and "
+        "time decoding separately (README: 'Decode, not transport'); decode in a process pool "
+        "or at a smaller size."
     ),
-    "upload": "Uploads are the limit: write fewer, larger outputs, or use larger batches.",
+    "upload": "Uploads are the limit: write fewer, larger outputs, or raise batch_size.",
 }
 
 # How often compute() and take() log a progress line, in seconds.
@@ -74,7 +75,8 @@ class BagStats:
 
     ``wait_s`` is time spent waiting for downloads, ``map_s`` time in the map function and
     ``upload_s`` time writing outputs. ``bound_by`` names the largest of the three and ``hint``
-    the setting to change, so a person or an agent can tune the next run.
+    the setting to change, so a person or an agent can tune the next run. The three exclude
+    ``setup()`` and listing; ``seconds`` includes them.
     """
 
     processed: int
@@ -149,9 +151,10 @@ def _warn_if_not_done(batch: list[LoadedItem], pairs: list[Output], done: str) -
 
 
 def _log_progress(inputs: int, total: int, elapsed: float, split: str) -> None:
+    """Log inputs done out of ``total``, the rate, the time left and the time split."""
     rate = inputs / elapsed if elapsed > 0 else 0.0
     left = f", about {(total - inputs) / rate / 60:.0f} min left" if rate else ""
-    logger.info("bucketbag: %d/%d inputs, %.1f/s%s; time: %s", inputs, total, rate, left, split)
+    logger.info("%d/%d inputs, %.1f/s%s; time: %s", inputs, total, rate, left, split)
 
 
 def _run(
@@ -169,19 +172,14 @@ def _run(
     inputs = count = outputs = 0
     wait_s = map_s = upload_s = 0.0
     warned = False
-    started = last_log = time.monotonic()
-    pending = iter(batches)
-    while True:
-        t0 = time.monotonic()
-        batch = next(pending, None)  # waits for the download
+    started = last_log = waiting_since = time.monotonic()
+    for batch in batches:  # each step waits for the next download
         t1 = time.monotonic()
-        if batch is None:
-            break
         pairs = list(apply(batch))
         t2 = time.monotonic()
         sink(pairs)
         t3 = time.monotonic()
-        wait_s += t1 - t0
+        wait_s += t1 - waiting_since
         map_s += t2 - t1
         upload_s += t3 - t2
         inputs += len(batch)
@@ -192,7 +190,17 @@ def _run(
         if t3 - last_log >= _PROGRESS_EVERY_S:
             _log_progress(inputs, total, t3 - started, _shares(wait_s, map_s, upload_s))
             last_log = t3
-    return BagStats(inputs, 0, count, outputs, time.monotonic() - started, wait_s, map_s, upload_s)
+        waiting_since = time.monotonic()
+    return BagStats(
+        processed=inputs,
+        skipped=0,
+        batches=count,
+        outputs=outputs,
+        seconds=time.monotonic() - started,
+        wait_s=wait_s,
+        map_s=map_s,
+        upload_s=upload_s,
+    )
 
 
 @dataclass(frozen=True)
@@ -344,8 +352,14 @@ class Bag:
             todo, skipped = self._list_todo(out, done)
         else:
             todo, skipped = self._list_inputs(limit=self.limit), 0
-        if skipped:
-            logger.info("Bag.compute: %d inputs already done, %d to do", skipped, len(todo))
+        logger.info(
+            "Bag.compute: %d to do, %d already done; batch_size=%s, max_bytes=%s, prefetch=%d",
+            len(todo),
+            skipped,
+            self.batch_size,
+            self.max_bytes,
+            prefetch,
+        )
         t0 = time.monotonic()
         apply = _with_context(fn, self.setup)
         batches = batched_files(
@@ -363,4 +377,6 @@ class Bag:
 
         with closing(batches):  # see take(): a kept exception must not keep the temp files
             stats = _run(apply, batches, upload, done, total=len(todo))
-        return replace(stats, skipped=skipped, seconds=time.monotonic() - t0)
+        stats = replace(stats, skipped=skipped, seconds=time.monotonic() - t0)
+        logger.info("Bag.compute: %s", stats)
+        return stats
