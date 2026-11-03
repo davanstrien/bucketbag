@@ -46,7 +46,8 @@ class FakeBucket:
 
     Failure switches:
         fail_download_on / fail_upload_on: 1-based call numbers, counted per method. That call
-            raises ``FaultInjected`` before it reads or writes anything.
+            raises ``FaultInjected`` (for downloads, ``download_error``) before it reads or
+            writes anything.
         partial_upload_on: that upload call stores the first half of its files, then raises
             ``FaultInjected``. The server applies the files of a batch that succeed and reports
             the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
@@ -74,6 +75,8 @@ class FakeBucket:
     fail_upload_on: set[int] = field(default_factory=set)
     partial_upload_on: set[int] = field(default_factory=set)
     download_seconds: float = 0.0
+    download_error: type[BaseException] = FaultInjected
+    dirs_at_download: list[int] = field(default_factory=list)
     calls: Counter[str] = field(default_factory=Counter)
     list_prefixes: list[str | None] = field(default_factory=list)
     uploads: list[tuple[str, list[str]]] = field(default_factory=list)
@@ -142,8 +145,12 @@ class FakeBucket:
         token: str | bool | None = None,
     ) -> None:
         number = self._count("download")
+        if files:
+            # Batch dirs on disk as this download starts, its own included (the high-water mark).
+            batch_dir = Path(files[0][1]).parent
+            self.dirs_at_download.append(len(list(batch_dir.parent.glob("bb-*"))))
         if number in self.fail_download_on:
-            raise FaultInjected(f"download call #{number} failed")
+            raise self.download_error(f"download call #{number} failed")
         data = self.store.get(bucket_id, {})
         for remote, local in files:
             key = remote.path if isinstance(remote, BucketFile) else remote

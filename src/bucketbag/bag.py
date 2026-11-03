@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar, overload
 
@@ -90,7 +91,7 @@ def _warn_if_not_done(batch: list[LoadedItem], pairs: list[Output], done: str) -
 def _run(
     apply: Callable[[list[LoadedItem]], Iterable[Output]],
     batches: Iterable[list[LoadedItem]],
-    sink: Callable[[list[Output]], object],
+    sink: Callable[[list[Output]], None],
     done: str | None,
 ) -> tuple[int, int, int]:
     """Map every batch and hand its outputs to ``sink``; return (inputs, batches, outputs).
@@ -224,7 +225,10 @@ class Bag:
             dir=dir,
             token=self.token,
         )
-        _run(apply, batches, outputs.extend, self.done)
+        # Closed here, not left to garbage collection: a caller that keeps a raised exception
+        # also keeps this frame, and with it the generator and its temp files.
+        with closing(batches):
+            _run(apply, batches, outputs.extend, self.done)
         return outputs
 
     def compute(
@@ -273,7 +277,8 @@ class Bag:
         def upload(pairs: list[Output]) -> None:
             put_files(pairs, out, token=self.token)
 
-        processed, count, outputs = _run(apply, batches, upload, done)
+        with closing(batches):  # see take(): a kept exception must not keep the temp files
+            processed, count, outputs = _run(apply, batches, upload, done)
         return BagStats(
             processed=processed,
             skipped=skipped,

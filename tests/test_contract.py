@@ -111,28 +111,28 @@ def test_folder_entries_are_skipped(tree: FakeBucket) -> None:
 # --- 2. Temporary files: tests/test_batched_files.py covers each prefetch level -----------
 
 
-def settled_dir_count(path: Path) -> int:
-    """The number of batch dirs once downloads stop changing it (the fake's are instant)."""
-    count, stable_since = count_bb_dirs(path), time.monotonic()
-    while time.monotonic() - stable_since < 0.05:
-        time.sleep(0.005)
-        now = count_bb_dirs(path)
-        if now != count:
-            count, stable_since = now, time.monotonic()
-    return count
-
-
 @pytest.mark.parametrize("prefetch", [0, 1, 2, 3])
 def test_at_most_prefetch_plus_one_batches_are_on_disk(
     bucket: FakeBucket, tmp_path: Path, prefetch: int
 ) -> None:
     files = bucket.seed(SRC, [f"pages/p{i:02d}.jp2" for i in range(10)])
-    peak = 0
     for _ in batched_files(SRC, keys=files, n=1, prefetch=prefetch, dir=tmp_path):
-        peak = max(peak, settled_dir_count(tmp_path))
-    assert peak <= prefetch + 1
+        time.sleep(0.02)  # hold the batch, so downloads ahead start while it is on disk
+    # The fake counts batch dirs as each download starts, so a peak between yields counts too.
+    assert max(bucket.dirs_at_download) <= prefetch + 1
     if prefetch:
-        assert peak >= 2  # the lookahead does download ahead
+        assert max(bucket.dirs_at_download) >= 2  # the lookahead does download ahead
+
+
+def test_a_worker_error_does_not_stop_the_cleanup(bucket: FakeBucket, tmp_path: Path) -> None:
+    files = bucket.seed(SRC, PAGES)
+    bucket.fail_download_on.add(2)
+    bucket.download_error = SystemExit  # a BaseException stored in a queued download
+    batches = batched_files(SRC, keys=files, n=1, prefetch=3, dir=tmp_path)
+    next(batches)
+    time.sleep(0.05)  # let the queued downloads finish
+    batches.close()
+    assert count_bb_dirs(tmp_path) == 0
 
 
 @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
@@ -263,6 +263,26 @@ def assert_rerun_finishes_the_rest(bucket: FakeBucket, tmp_path: Path, done_befo
     assert out_keys(bucket) == [key + ".md" for key in PAGES]
     written = bucket.uploaded_keys(OUT)
     assert len(written) == len(set(written)), "an output was written twice"
+
+
+@pytest.mark.parametrize("entry", ["take", "compute"])
+def test_a_kept_exception_does_not_keep_temp_files(
+    bucket: FakeBucket, tmp_path: Path, entry: str
+) -> None:
+    bucket.seed(SRC, PAGES)
+    failing = (
+        Bag.from_bucket(SRC).map_batches(fail_on_batch(2), batch_size=2).to_bucket(OUT, done=".md")
+    )
+    kept: list[BaseException] = []  # a notebook or a retry loop keeps the error and its traceback
+    try:
+        if entry == "take":
+            failing.take(6, dir=tmp_path)
+        else:
+            failing.compute(prefetch=2, dir=tmp_path)
+    except Boom as error:
+        kept.append(error)
+    assert kept
+    assert count_bb_dirs(tmp_path) == 0
 
 
 def test_map_function_error_raises_and_keeps_earlier_outputs(

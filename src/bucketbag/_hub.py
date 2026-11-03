@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -266,7 +266,7 @@ def _drain(ahead: deque[Future[_Batch]]) -> None:
             continue
         try:
             batch = future.result()
-        except Exception:
+        except BaseException:  # noqa: BLE001 - keep draining; the error in flight still raises
             continue  # a failed download already removed its own dir
         shutil.rmtree(batch.tmpdir, ignore_errors=True)
 
@@ -328,17 +328,15 @@ def batched_files(
     _check_batch_settings(n, max_bytes, prefetch)
     ref = BucketRef.parse(bucket)
     if keys is not None:
-        remotes: list[BucketFile | str] = list(keys)
+        remotes: Sequence[BucketFile | str] = list(keys)
     else:
-        remotes = list(
-            _list_bucketfiles(
-                ref.under(prefix),
-                include=include,
-                exclude=exclude,
-                start_after=start_after,
-                limit=limit,
-                token=token,
-            )
+        remotes = _list_bucketfiles(
+            ref.under(prefix),
+            include=include,
+            exclude=exclude,
+            start_after=start_after,
+            limit=limit,
+            token=token,
         )
     if max_bytes is not None and not all(isinstance(r, BucketFile) for r in remotes):
         raise ValueError(
