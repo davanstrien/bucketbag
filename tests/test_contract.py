@@ -288,13 +288,24 @@ def test_unworkable_batch_bounds_are_refused_before_listing(
     assert bucket.calls["list"] == 0
 
 
-def test_negative_prefetch_is_refused_before_listing(bucket: FakeBucket, tmp_path: Path) -> None:
+def test_negative_prefetch_is_refused_before_listing_or_setup(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
     bucket.seed(SRC, PAGES)
+    setups: list[int] = []
+
+    def load_model() -> None:
+        setups.append(1)
+
+    def fn(items: list[LoadedItem], ctx: None) -> list[Output]:
+        return upper_md(items)
+
+    run = Bag.from_bucket(SRC).map_batches(fn, setup=load_model).to_bucket(OUT)
     with pytest.raises(ValueError, match="prefetch"):
         next(batched_files(SRC, prefetch=-1, dir=tmp_path))
     with pytest.raises(ValueError, match="prefetch"):
-        bag().compute(prefetch=-1, dir=tmp_path)
-    assert bucket.calls["list"] == 0
+        run.compute(prefetch=-1, dir=tmp_path)
+    assert (bucket.calls["list"], setups) == (0, [])
 
 
 def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Path) -> None:
