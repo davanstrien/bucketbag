@@ -259,6 +259,30 @@ def _download_batch(
     return _Batch(tmpdir, present)
 
 
+def _warn_if_scratch_is_small(
+    chunks: list[list[BucketFile | str]], prefetch: int, base_dir: Path
+) -> None:
+    """Warn when the largest batches that can be on disk at once exceed the free space.
+
+    Only sized keys count, so string keys never warn.
+    """
+    sizes = sorted(
+        (sum(getattr(r, "size", 0) or 0 for r in chunk) for chunk in chunks), reverse=True
+    )
+    peak = sum(sizes[: prefetch + 1])
+    free = shutil.disk_usage(base_dir).free
+    if peak > free:
+        logger.warning(
+            "Up to %.2f GB of batches can be on %s at once (prefetch + 1 = %d batches), but "
+            "only %.2f GB is free. Lower max_bytes or prefetch, or pass dir= on a larger disk. "
+            "/dev/shm is RAM, so running out there kills the process.",
+            peak / 1e9,
+            base_dir,
+            prefetch + 1,
+            free / 1e9,
+        )
+
+
 def _drain(ahead: deque[Future[_Batch]]) -> None:
     """Delete every queued batch: cancel downloads not started, then wait for the rest.
 
@@ -351,7 +375,9 @@ def batched_files(
 
     api = HfApi(token=token)
     base_dir = _resolve_dir(dir)
-    chunks = _pack(remotes, n, max_bytes)
+    packed = list(_pack(remotes, n, max_bytes))
+    _warn_if_scratch_is_small(packed, prefetch, base_dir)
+    chunks = iter(packed)
 
     def fetch(chunk: list[BucketFile | str]) -> _Batch:
         return _download_batch(api, ref.bucket_id, chunk, base_dir, token)

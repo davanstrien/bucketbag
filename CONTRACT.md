@@ -89,3 +89,14 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   signature is not inspected.
 - `completed_keys` skips a shard it cannot read, with a warning. A readable shard without
   `column` raises `ValueError`, so a wrong `column=` cannot make resume rerun everything.
+
+## 6. Run report (`Bag`)
+
+- `compute()` returns `BagStats` with the time spent waiting for downloads (`wait_s`), in the
+  map function (`map_s`) and writing outputs (`upload_s`). `bound_by` names the largest of the
+  three and `hint` the setting to change. Both are `None` and `""` when no batch ran.
+  `print(stats)` shows the split and the verdict.
+- `compute()` and `take()` log a progress line every 30 seconds at INFO on the `bucketbag`
+  logger: inputs done out of the total, the rate, the time left and the split.
+- `batched_files` warns before the first download when the largest `prefetch + 1` batches
+  would not fit in the scratch dir's free space. String keys carry no size, so they never warn.

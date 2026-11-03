@@ -51,8 +51,8 @@ class FakeBucket:
         partial_upload_on: that upload call stores the first half of its files, then raises
             ``FaultInjected``. The server applies the files of a batch that succeed and reports
             the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
-        download_seconds: each download call sleeps this long after writing its files, so a
-            test can interrupt the consumer while it waits.
+        download_seconds / upload_seconds: each download or upload call sleeps this long, so
+            a test can interrupt a wait or make that stage the slow one.
         missing: keys that a listing returns but that are gone by download time. As in the
             hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
             existence check (it downloads by content hash), so what the real hub does then is
@@ -75,6 +75,7 @@ class FakeBucket:
     fail_upload_on: set[int] = field(default_factory=set)
     partial_upload_on: set[int] = field(default_factory=set)
     download_seconds: float = 0.0
+    upload_seconds: float = 0.0
     download_error: type[BaseException] = FaultInjected
     dirs_at_download: list[int] = field(default_factory=list)
     calls: Counter[str] = field(default_factory=Counter)
@@ -185,6 +186,8 @@ class FakeBucket:
             staged = staged[: len(staged) // 2]
         self.store.setdefault(bucket_id, {}).update(staged)
         self.uploads.append((bucket_id, [dest for dest, _ in staged]))
+        if self.upload_seconds:
+            time.sleep(self.upload_seconds)
         if partial:
             raise FaultInjected(f"upload call #{number} stored {len(staged)} file(s), then failed")
 

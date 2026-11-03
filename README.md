@@ -66,8 +66,14 @@ bag = (Bag.from_bucket(SRC, include="**/*.jp2")
          .map_batches(ocr_batch, batch_size=32, setup=load_model)   # fn(items[, ctx]) -> [(key, content)]
          .to_bucket(OUT, done=".md"))                                  # input k is done once k + ".md" exists
 bag.take(3)        # dev peek: outputs only, nothing written
-bag.compute()      # list -> skip done -> download -> fn -> put_files; kill + re-run safe
+stats = bag.compute()  # list -> skip done -> download -> fn -> put_files; kill + re-run safe
+print(stats)  # for example:
+# 476 processed (+24 skipped as done) in 30 batches -> 952 outputs, 3712.4s
+# time: download wait 1%, map 98%, upload 1%; bound by map. The map function is the limit: ...
 ```
+
+`stats.bound_by` (`"download"`, `"map"` or `"upload"`) and `stats.hint` tell a person or an
+agent what to tune next; a progress line with the same split is logged every 30 s.
 
 Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
 (`pages/p10.md` never marks `pages/p1` done). `compute()`

@@ -469,6 +469,82 @@ def test_completed_keys_skips_an_unreadable_shard(
     assert any("part-1" in record.getMessage() for record in caplog.records)
 
 
+# --- 6. Run report ----------------------------------------------------------------------
+
+
+def slow_map(items: list[LoadedItem]) -> list[Output]:
+    time.sleep(0.03)
+    return upper_md(items)
+
+
+@pytest.mark.parametrize(
+    ("stage", "words"),
+    [
+        ("download", "prefetch"),
+        ("map", "map function"),
+        ("upload", "Uploads"),
+    ],
+)
+def test_stats_name_the_slowest_stage_and_what_to_change(
+    bucket: FakeBucket, tmp_path: Path, stage: str, words: str
+) -> None:
+    bucket.seed(SRC, PAGES)
+    fn = upper_md
+    if stage == "download":
+        bucket.download_seconds = 0.03
+    elif stage == "map":
+        fn = slow_map
+    else:
+        bucket.upload_seconds = 0.03
+    run = Bag.from_bucket(SRC).map_batches(fn, batch_size=2).to_bucket(OUT, done=".md")
+    stats = run.compute(prefetch=0, dir=tmp_path)
+    assert stats.bound_by == stage
+    assert words in stats.hint
+    assert f"bound by {stage}" in str(stats)
+
+
+def test_a_run_with_nothing_to_do_has_no_verdict(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES)
+    bag().compute(prefetch=0, dir=tmp_path)
+    stats = bag().compute(prefetch=0, dir=tmp_path)  # everything is done
+    assert (stats.batches, stats.bound_by, stats.hint) == (0, None, "")
+    assert "bound by" not in str(stats)
+
+
+def test_progress_is_logged_with_the_time_split(
+    bucket: FakeBucket,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bucketbag.bag, "_PROGRESS_EVERY_S", 0.0)  # log after every batch
+    bucket.seed(SRC, PAGES)
+    with caplog.at_level(logging.INFO, logger="bucketbag"):
+        bag().compute(prefetch=0, dir=tmp_path)
+    lines = [r.getMessage() for r in caplog.records if "inputs" in r.getMessage()]
+    assert lines[-1].startswith("bucketbag: 6/6 inputs")
+    assert "download wait" in lines[-1] and "map" in lines[-1]
+
+
+def test_a_too_small_scratch_dir_is_reported(
+    bucket: FakeBucket,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = bucket.seed(SRC, PAGES)  # 4 bytes each; with n=2 and prefetch=2, up to 24 on disk
+
+    def disk_with(free: int) -> Callable[[object], SimpleNamespace]:
+        return lambda path: SimpleNamespace(total=free, used=0, free=free)
+
+    for free, warns in ((23, True), (24, False)):
+        monkeypatch.setattr(bucketbag._hub.shutil, "disk_usage", disk_with(free))
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="bucketbag"):
+            list(batched_files(SRC, keys=files, n=2, prefetch=2, dir=tmp_path))
+        assert any("GB is free" in r.getMessage() for r in caplog.records) is warns
+
+
 # --- Public names -------------------------------------------------------------------------
 
 
