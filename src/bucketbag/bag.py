@@ -349,6 +349,7 @@ class Bag:
             )
         _check_batch_settings(self.batch_size, self.max_bytes, prefetch)
 
+        t0 = time.monotonic()  # BagStats.seconds covers listing and setup() too
         if resume and done is not None:
             todo, skipped = self._list_todo(out, done)
         else:
@@ -361,7 +362,6 @@ class Bag:
             self.max_bytes,
             prefetch,
         )
-        t0 = time.monotonic()
         apply = _with_context(fn, self.setup)
         batches = batched_files(
             self.src,

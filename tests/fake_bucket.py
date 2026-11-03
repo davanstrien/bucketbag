@@ -54,8 +54,8 @@ class FakeBucket:
         partial_upload_on: that upload call stores the first half of its files, then raises
             ``FaultInjected``. The server applies the files of a batch that succeed and reports
             the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
-        download_seconds / upload_seconds: each download or upload call sleeps this long, so
-            a test can interrupt a wait or make that stage the slow one.
+        list_seconds / download_seconds / upload_seconds: each call of that kind sleeps this
+            long, so a test can interrupt a wait or make that stage the slow one.
         missing: keys that a listing returns but that are gone by download time. As in the
             hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
             existence check (it downloads by content hash), so what the real hub does then is
@@ -77,6 +77,7 @@ class FakeBucket:
     fail_download_on: set[int] = field(default_factory=set)
     fail_upload_on: set[int] = field(default_factory=set)
     partial_upload_on: set[int] = field(default_factory=set)
+    list_seconds: float = 0.0
     download_seconds: float = 0.0
     upload_seconds: float = 0.0
     download_error: type[BaseException] = FaultInjected
@@ -129,6 +130,8 @@ class FakeBucket:
     ) -> Iterator[BucketFile | BucketFolder]:
         self._count("list")
         self.list_prefixes.append(prefix)
+        if self.list_seconds:
+            time.sleep(self.list_seconds)
         if not recursive:
             raise NotImplementedError("FakeBucket models recursive listings only")
         keys = self._matching_keys(bucket_id, prefix or "")

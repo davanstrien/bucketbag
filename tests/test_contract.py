@@ -509,6 +509,19 @@ def test_stats_name_the_slowest_stage_and_what_to_change(
     assert f"bound by {stage}" in str(stats)
 
 
+def test_seconds_covers_listing_and_setup(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES[:1])
+    bucket.list_seconds = SLOW  # the source and the output listing
+
+    def fn(items: list[LoadedItem], ctx: None) -> list[Output]:
+        return upper_md(items)
+
+    run = Bag.from_bucket(SRC).map_batches(fn, setup=lambda: time.sleep(SLOW))
+    stats = run.to_bucket(OUT, done=".md").compute(prefetch=0, dir=tmp_path)
+    assert stats.seconds >= 3 * SLOW
+    assert stats.wait_s + stats.map_s + stats.upload_s < SLOW  # the split leaves both out
+
+
 def test_a_run_with_nothing_to_do_has_no_verdict(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.seed(SRC, PAGES)
     bag().compute(prefetch=0, dir=tmp_path)
