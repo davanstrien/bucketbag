@@ -11,6 +11,7 @@ from bucketbag import _glob_prefix, _glob_to_re
 # A "literal" alphabet: any chars except the glob metacharacters and surrogate/whitespace noise.
 _LITERAL = st.characters(blacklist_categories=("Cs",), blacklist_characters="*?[ \t\n/")
 
+
 # --- _glob_to_re: concrete semantics ---------------------------------------
 @pytest.mark.parametrize(
     "pattern, key, matches",
