@@ -126,7 +126,7 @@ def test_at_most_prefetch_plus_one_batches_are_on_disk(
 
 def test_a_worker_error_does_not_stop_the_cleanup(bucket: FakeBucket, tmp_path: Path) -> None:
     files = bucket.seed(SRC, PAGES)
-    bucket.fail_download_on.add(2)
+    bucket.fail_download_keys.add(PAGES[1])  # batch 2: queued behind batch 1, ahead of 3 and 4
     bucket.download_error = SystemExit  # a BaseException stored in a queued download
     batches = batched_files(SRC, keys=files, n=1, prefetch=3, dir=tmp_path)
     next(batches)

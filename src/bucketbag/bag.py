@@ -119,18 +119,6 @@ class BagStats:
         return f"{line}\ntime: {split}; bound by {self.bound_by}. {self.hint}"
 
 
-@dataclass(frozen=True)
-class _Counts:
-    """What ``_run`` counted and timed."""
-
-    inputs: int
-    batches: int
-    outputs: int
-    wait_s: float
-    map_s: float
-    upload_s: float
-
-
 def _with_context(
     fn: MapFn, setup: Callable[[], Any] | None
 ) -> Callable[[list[LoadedItem]], Iterable[Output]]:
@@ -172,7 +160,7 @@ def _run(
     sink: Callable[[list[Output]], None],
     done: str | None,
     total: int,
-) -> _Counts:
+) -> BagStats:
     """Map every batch and hand its outputs to ``sink``, timing each stage.
 
     Warns once per run about an input whose ``key + done`` output is missing, and logs a
@@ -204,7 +192,7 @@ def _run(
         if t3 - last_log >= _PROGRESS_EVERY_S:
             _log_progress(inputs, total, t3 - started, _shares(wait_s, map_s, upload_s))
             last_log = t3
-    return _Counts(inputs, count, outputs, wait_s, map_s, upload_s)
+    return BagStats(inputs, 0, count, outputs, time.monotonic() - started, wait_s, map_s, upload_s)
 
 
 @dataclass(frozen=True)
@@ -374,14 +362,5 @@ class Bag:
             put_files(pairs, out, token=self.token)
 
         with closing(batches):  # see take(): a kept exception must not keep the temp files
-            counts = _run(apply, batches, upload, done, total=len(todo))
-        return BagStats(
-            processed=counts.inputs,
-            skipped=skipped,
-            batches=counts.batches,
-            outputs=counts.outputs,
-            seconds=time.monotonic() - t0,
-            wait_s=counts.wait_s,
-            map_s=counts.map_s,
-            upload_s=counts.upload_s,
-        )
+            stats = _run(apply, batches, upload, done, total=len(todo))
+        return replace(stats, skipped=skipped, seconds=time.monotonic() - t0)
