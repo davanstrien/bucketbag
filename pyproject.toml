@@ -36,7 +36,7 @@ select = ["E", "F", "I", "UP", "B"]
 "experiments/**" = ["B905"]
 
 [tool.ty.src]
-include = ["src"]
+include = ["src", "tests"]
 
 [tool.ty.analysis]
 # pyarrow is an optional import in completed_keys, not a bucketbag dependency.

@@ -7,15 +7,25 @@ more thoroughly than hand-written cases.
 
 from __future__ import annotations
 
+import pytest
 from conftest import bf
+from huggingface_hub import BucketFile
 from hypothesis import given
 from hypothesis import strategies as st
 
 from bucketbag import _pack
 
+pytestmark = pytest.mark.internals
+
 
 def paths(batches):
     return [[f.path for f in b] for b in batches]
+
+
+def size(f: BucketFile | str) -> int:
+    """The byte size of one packed item; every item these tests pack is a ``BucketFile``."""
+    assert isinstance(f, BucketFile)
+    return f.size
 
 
 # --- concrete cases ---------------------------------------------------------
@@ -39,7 +49,7 @@ def test_pack_single_file_larger_than_max_bytes_is_own_batch():
     batches = list(_pack(items, n=None, max_bytes=50))
     assert paths(batches) == [["a"], ["huge"], ["b"]]
     # the oversized batch legitimately exceeds the cap — files can't be split.
-    assert sum(f.size for f in batches[1]) > 50
+    assert sum(size(f) for f in batches[1]) > 50
 
 
 def test_pack_no_caps_is_one_batch():
@@ -58,12 +68,8 @@ def test_pack_count_and_bytes_whichever_first():
 
 
 def test_pack_unknown_size_counts_as_zero():
-    # A plain object with no `.size` -> getattr(...,0) -> 0; never triggers the bytes cap.
-    class Bare:
-        def __init__(self, p):
-            self.path = p
-
-    items = [Bare(f"f{i}") for i in range(4)]
+    # A string key has no `.size` -> getattr(...,0) -> 0; never triggers the bytes cap.
+    items = [f"f{i}" for i in range(4)]
     assert len(list(_pack(items, n=None, max_bytes=1))) == 1  # all zero-size -> one batch
 
 
@@ -115,7 +121,7 @@ def test_pack_bytes_cap_respected_except_oversize_singletons(sizes, max_bytes):
     # n is irrelevant to the bytes invariant, so leave it None.
     batches = list(_pack([bf(f"k{i}", s) for i, s in enumerate(sizes)], None, max_bytes))
     for b in batches:
-        total = sum(f.size for f in b)
+        total = sum(size(f) for f in b)
         if len(b) == 1:
             # a single file may exceed the cap (files can't be split) — always fine.
             continue
@@ -133,10 +139,10 @@ def test_pack_greedy_correctness(sizes, max_bytes):
     idx = 0
     for b in batches:
         nb = len(b)
-        total = sum(f.size for f in b)
+        total = sum(size(f) for f in b)
         # if there's a following item, adding it should have overflowed (count == already packed).
         if idx + nb < len(items) and len(b) >= 1:
-            nxt = flat[idx + nb].size
+            nxt = size(flat[idx + nb])
             # Batch closes only because adding `next` would exceed max_bytes,
             # unless this batch is a forced oversize singleton.
             forced_singleton = len(b) == 1 and total > max_bytes

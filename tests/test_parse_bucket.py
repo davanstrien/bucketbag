@@ -8,6 +8,8 @@ from hypothesis import strategies as st
 
 from bucketbag import _parse_bucket
 
+pytestmark = pytest.mark.internals
+
 
 # --- concrete cases ---------------------------------------------------------
 @pytest.mark.parametrize(

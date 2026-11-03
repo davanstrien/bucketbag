@@ -1,0 +1,252 @@
+"""The contract in CONTRACT.md, one test per rule, through public entry points only.
+
+Tests marked ``known_gap`` check a rule that today's code breaks. Each fails with ``KnownGap``
+(strict xfail) until its fix lands; the fix removes the marker.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Iterable
+from pathlib import Path
+
+import pytest
+from conftest import count_bb_dirs, gap, known_gap
+from fake_bucket import FakeBucket, FaultInjected
+
+from bucketbag import Bag, LoadedItem, batched_files, iter_keys, put_files
+
+SRC, OUT = "ns/src", "ns/out"
+PAGES = [f"pages/p{i}.jp2" for i in range(6)]
+
+Output = tuple[str, bytes]
+
+
+def upper_md(items: list[LoadedItem]) -> list[Output]:
+    """One output per input, keyed by the input key + ".md" (the resume convention)."""
+    return [(it.key + ".md", it.bytes.upper()) for it in items]
+
+
+def bag(batch_size: int = 2) -> Bag:
+    return Bag.from_bucket(SRC).map_batches(upper_md, batch_size=batch_size).to_bucket(OUT)
+
+
+def out_keys(bucket: FakeBucket) -> list[str]:
+    return bucket.keys(OUT)
+
+
+# --- 1. Addressing ------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tree(bucket: FakeBucket) -> FakeBucket:
+    bucket.seed("ns/b", ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2", "c.jp2"])
+    return bucket
+
+
+def test_trailing_slash_prefix_is_one_directory(tree: FakeBucket) -> None:
+    assert list(iter_keys("ns/b", prefix="a/b/")) == ["a/b/x.jp2", "a/b/y.jp2"]
+
+
+def test_prefix_without_slash_also_matches_siblings(tree: FakeBucket) -> None:
+    assert list(iter_keys("ns/b", prefix="a/b")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
+
+
+@known_gap("_parse_bucket drops the trailing slash of a prefix inside the bucket reference")
+def test_trailing_slash_inside_bucket_reference_is_one_directory(tree: FakeBucket) -> None:
+    keys = list(iter_keys("hf://buckets/ns/b/a/b/"))
+    if keys != ["a/b/x.jp2", "a/b/y.jp2"]:
+        gap(f"'hf://buckets/ns/b/a/b/' listed {keys}")
+
+
+@known_gap("a Hub web URL is parsed as bucket 'https:/'")
+def test_web_url_is_a_bucket_reference(tree: FakeBucket) -> None:
+    keys = list(iter_keys("https://huggingface.co/buckets/ns/b/tree/a/b/"))
+    if keys != ["a/b/x.jp2", "a/b/y.jp2"]:
+        gap(f"the web URL listed {keys}")
+
+
+def test_globs_match_the_whole_key_from_the_bucket_root(tree: FakeBucket) -> None:
+    # `*.jp2` matches root-level keys only: `*` does not cross `/`, and the glob is not
+    # relative to the prefix. Callers build `include=f"{prefix}{pattern}"` on this rule.
+    assert list(iter_keys("ns/b", include="*.jp2")) == ["c.jp2"]
+    assert list(iter_keys("ns/b", prefix="a/b/", include="*.jp2")) == []
+    assert list(iter_keys("ns/b", prefix="a/b/", include="a/b/*.jp2")) == ["a/b/x.jp2", "a/b/y.jp2"]
+    assert len(list(iter_keys("ns/b", include="**/*.jp2"))) == 4
+
+
+def test_listings_return_full_keys_sorted(tree: FakeBucket) -> None:
+    tree.listing_order = "reversed"
+    assert list(iter_keys("ns/b", prefix="a/")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
+
+
+def test_put_files_writes_under_the_prefix_in_the_reference(bucket: FakeBucket) -> None:
+    put_files([("k.md", "text")], "hf://buckets/ns/out/run1")
+    assert bucket.keys(OUT) == ["run1/k.md"]
+
+
+# --- 3. Resume ----------------------------------------------------------------------------
+
+
+def test_rerun_of_a_finished_run_processes_nothing(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES, b"page")
+    first = bag().compute(prefetch=0, dir=tmp_path)
+    second = bag().compute(prefetch=0, dir=tmp_path)
+    assert (first.processed, second.processed, second.skipped) == (6, 0, 6)
+    assert out_keys(bucket) == [key + ".md" for key in PAGES]
+    assert bucket.get(OUT, "pages/p0.jp2.md") == b"PAGE"
+
+
+def test_output_under_a_run_prefix_marks_its_input_done(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES, b"page")
+    run = Bag.from_bucket(SRC).map_batches(upper_md).to_bucket(f"{OUT}/run1")
+    run.compute(prefetch=0, dir=tmp_path)
+    assert run.compute(prefetch=0, dir=tmp_path).processed == 0
+
+
+@known_gap("an output key that does not start with its input key is not reported")
+def test_output_key_without_the_input_key_is_reported(
+    bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def replace_extension(items: list[LoadedItem]) -> list[Output]:
+        return [(it.key.removesuffix(".jp2") + ".md", b"text") for it in items]
+
+    bucket.seed(SRC, PAGES[:2])
+    run = Bag.from_bucket(SRC).map_batches(replace_extension).to_bucket(OUT)
+    with caplog.at_level(logging.WARNING, logger="bucketbag"):
+        run.compute(prefetch=0, dir=tmp_path)
+    if not any("resume" in record.getMessage() for record in caplog.records):
+        gap("no warning that these outputs can never mark their inputs done")
+
+
+# --- 4. Failures --------------------------------------------------------------------------
+
+
+class Boom(RuntimeError):
+    pass
+
+
+def fail_on_batch(number: int) -> Callable[[list[LoadedItem]], list[Output]]:
+    """A map function that raises on its ``number``-th call (1-based)."""
+    calls = 0
+
+    def fn(items: list[LoadedItem]) -> list[Output]:
+        nonlocal calls
+        calls += 1
+        if calls == number:
+            raise Boom(f"batch {number}")
+        return upper_md(items)
+
+    return fn
+
+
+def run_expecting(error: type[BaseException], run: Bag, tmp_path: Path) -> None:
+    with pytest.raises(error):
+        run.compute(prefetch=2, dir=tmp_path)
+    assert count_bb_dirs(tmp_path) == 0
+
+
+def assert_rerun_finishes_the_rest(bucket: FakeBucket, tmp_path: Path, done_before: int) -> None:
+    stats = bag().compute(prefetch=2, dir=tmp_path)
+    assert (stats.skipped, stats.processed) == (done_before, len(PAGES) - done_before)
+    assert out_keys(bucket) == [key + ".md" for key in PAGES]
+    written = bucket.uploaded_keys(OUT)
+    assert len(written) == len(set(written)), "an output was written twice"
+
+
+def test_map_function_error_raises_and_keeps_earlier_outputs(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    bucket.seed(SRC, PAGES)
+    failing = Bag.from_bucket(SRC).map_batches(fail_on_batch(2), batch_size=2).to_bucket(OUT)
+    run_expecting(Boom, failing, tmp_path)
+    assert out_keys(bucket) == ["pages/p0.jp2.md", "pages/p1.jp2.md"]
+    assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=2)
+
+
+def test_download_error_raises_and_keeps_earlier_outputs(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    bucket.seed(SRC, PAGES)
+    bucket.fail_download_on.add(3)
+    run_expecting(FaultInjected, bag(), tmp_path)
+    bucket.fail_download_on.clear()
+    # Two prefetch threads: batch 3's download starts only after batch 1's or 2's has, so it is
+    # call #3, and batches 1 and 2 are written before compute() reaches it.
+    assert len(out_keys(bucket)) == 4
+    assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=4)
+
+
+def test_upload_error_raises_and_that_batch_writes_nothing(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    bucket.seed(SRC, PAGES)
+    bucket.fail_upload_on.add(2)
+    run_expecting(FaultInjected, bag(), tmp_path)
+    bucket.fail_upload_on.clear()
+    assert out_keys(bucket) == ["pages/p0.jp2.md", "pages/p1.jp2.md"]
+    assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=2)
+
+
+def test_partial_upload_raises_and_what_landed_counts_as_done(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    bucket.seed(SRC, PAGES)
+    bucket.partial_upload_on.add(2)  # batch 2 stores 1 of its 2 outputs, then fails
+    run_expecting(FaultInjected, bag(), tmp_path)
+    bucket.partial_upload_on.clear()
+    assert out_keys(bucket) == ["pages/p0.jp2.md", "pages/p1.jp2.md", "pages/p2.jp2.md"]
+    assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=3)
+
+
+def test_file_gone_at_download_is_skipped_and_stays_not_done(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    bucket.seed(SRC, PAGES)
+    bucket.missing.add("pages/p3.jp2")
+    with pytest.warns(UserWarning, match="p3.jp2"):
+        bag().compute(prefetch=0, dir=tmp_path)
+    assert "pages/p3.jp2.md" not in out_keys(bucket)
+    bucket.missing.clear()
+    assert bag().compute(prefetch=0, dir=tmp_path).processed == 1
+
+
+@known_gap("BagStats does not count inputs skipped because their file was gone")
+def test_stats_account_for_every_listed_input(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES)
+    bucket.missing.add("pages/p3.jp2")
+    with pytest.warns(UserWarning):
+        stats = bag().compute(prefetch=0, dir=tmp_path)
+    missing = getattr(stats, "missing", None)
+    if missing is None or stats.processed + stats.skipped + missing != len(PAGES):
+        gap(f"{stats} does not add up to {len(PAGES)} listed inputs")
+
+
+# --- 5. Arguments -------------------------------------------------------------------------
+
+
+@known_gap("batched_files does not refuse batch settings that cannot work")
+@pytest.mark.parametrize(("n", "max_bytes"), [(None, None), (0, None)])
+def test_unworkable_batch_settings_are_refused(
+    bucket: FakeBucket, tmp_path: Path, n: int | None, max_bytes: int | None
+) -> None:
+    files = bucket.seed(SRC, PAGES)
+    try:
+        sizes = [
+            len(b) for b in batched_files(SRC, keys=files, n=n, max_bytes=max_bytes, dir=tmp_path)
+        ]
+    except ValueError:
+        return
+    gap(f"n={n}, max_bytes={max_bytes} ran with batch sizes {sizes}")
+
+
+@known_gap("without setup=, a keyword-only parameter makes bucketbag pass None positionally")
+def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Path) -> None:
+    def fn(items: list[LoadedItem], *, suffix: str = ".md") -> Iterable[Output]:
+        return [(it.key + suffix, b"x") for it in items]
+
+    bucket.seed(SRC, PAGES[:1])
+    try:
+        Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
+    except TypeError as error:
+        gap(f"fn(items, *, suffix=...) failed: {error}")

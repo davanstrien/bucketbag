@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import bisect
 import inspect
+import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
@@ -153,7 +154,7 @@ class Bag:
         todo = [f for f in files if not is_done(f.path)]
         return todo, len(files) - len(todo)
 
-    def take(self, n: int, *, dir: str | None = None) -> list[tuple[str, Any]]:
+    def take(self, n: int, *, dir: str | os.PathLike[str] | None = None) -> list[tuple[str, Any]]:
         """Dev peek: run the plan on the first ``n`` items and return the outputs. No writes."""
         if self.fn is None:
             raise ValueError("take() needs a map_batches(fn) stage")
@@ -171,7 +172,7 @@ class Bag:
         *,
         resume: bool = True,
         prefetch: int = 2,
-        dir: str | None = None,
+        dir: str | os.PathLike[str] | None = None,
     ) -> BagStats:
         """Run the plan in-process: list, skip done (``resume``), download, map, write.
 

@@ -13,6 +13,7 @@ import pytest
 from bucketbag import LoadedItem
 
 
+@pytest.mark.internals
 def test_bytes_reads_and_caches(tmp_path: Path):
     f = tmp_path / "x.bin"
     f.write_bytes(b"payload")
