@@ -37,8 +37,9 @@ when the loop ends. A caller that keeps the generator in a variable must call `.
 - An input is done when an output key under the `to_bucket` prefix starts with the input's key
   (`pages/p1.jp2` → `pages/p1.jp2.md`). `compute()` processes only inputs that are not done;
   `compute(resume=False)` processes all of them.
-- **Gap:** an output key that does not start with its input key is not reported. That input
-  runs again on every re-run.
+- An output key that does not start with an input key of its batch is logged as a warning,
+  once per `compute()` or `take()`. Resume cannot match it, so that input runs again on every
+  re-run.
 - `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs once per
   `compute()` or `take()`.
 
@@ -69,10 +70,12 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 - `batch_size` caps a batch's file count and `max_bytes` its total size; a single file larger
   than `max_bytes` forms its own batch. `max_bytes` with string keys raises `ValueError`:
   string keys carry no size.
-- **Gap:** settings that cannot work are not refused. `n=None` with `max_bytes=None` makes one
-  batch of every file, and `n=0` yields an empty batch first.
-- The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given.
-  **Gap:** without `setup=`, bucketbag inspects the function's signature and passes `None` as a
-  second argument when it sees two parameters, which breaks `fn(items, *, flag=False)`.
-- **Gap:** `completed_keys` turns every shard read error into a warning, so a wrong `column=`
-  returns an empty set and resume reruns everything. (The test lands with the fix.)
+- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) and
+  `prefetch` must be whole numbers; `max_bytes` may be any finite number, such as `4e9`. A bool,
+  nan or inf raises `TypeError`. At least one of `n` and `max_bytes` must be set, each at least
+  1, and `prefetch` must be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
+  the plan is built.
+- The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given. Its
+  signature is not inspected.
+- `completed_keys` skips a shard it cannot read, with a warning. A readable shard without
+  `column` raises `ValueError`, so a wrong `column=` cannot make resume rerun everything.

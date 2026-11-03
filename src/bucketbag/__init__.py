@@ -27,6 +27,8 @@ from __future__ import annotations
 import builtins
 import json as _json
 import logging
+import math
+import numbers
 import os
 import re
 import shutil
@@ -360,8 +362,45 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
+def _is_count(value: object) -> bool:
+    """A whole number that is not a bool (Python counts ``True`` as 1)."""
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
+def _is_byte_cap(value: object) -> bool:
+    """A finite real number that is not a bool. ``4e9`` is fine.
+
+    nan and inf compare False with every running total, so ``_pack`` would never split by
+    bytes and one batch would hold every file.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return False
+    return math.isfinite(value)
+
+
+def _check_batch_settings(n: int | None, max_bytes: float | None, prefetch: int = 0) -> None:
+    """Refuse batch settings that cannot work, before anything is listed or downloaded."""
+    if n is not None and not _is_count(n):
+        raise TypeError(f"n must be a whole number or None, got {n!r}.")
+    if max_bytes is not None and not _is_byte_cap(max_bytes):
+        raise TypeError(f"max_bytes must be a finite number or None, got {max_bytes!r}.")
+    if not _is_count(prefetch):
+        raise TypeError(f"prefetch must be a whole number, got {prefetch!r}.")
+    if n is None and max_bytes is None:
+        raise ValueError(
+            "Batches need a bound: set the file count (n / batch_size), max_bytes, or both. "
+            "With neither, one batch would hold every file."
+        )
+    if n is not None and n < 1:
+        raise ValueError(f"The file count per batch must be at least 1, got {n}.")
+    if max_bytes is not None and max_bytes < 1:
+        raise ValueError(f"max_bytes must be at least 1, got {max_bytes}.")
+    if prefetch < 0:
+        raise ValueError(f"prefetch must be 0 or more, got {prefetch}.")
+
+
 def _pack(
-    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: int | None
+    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: float | None
 ) -> Iterator[list[BucketFile | str]]:
     """Group files into batches capped by count (``n``) and/or total bytes (``max_bytes``).
 
@@ -391,7 +430,7 @@ def batched_files(
     include: str | None = None,
     exclude: str | None = None,
     n: int | None = 20,
-    max_bytes: int | None = None,
+    max_bytes: float | None = None,
     dir: str | os.PathLike[str] | None = None,
     prefetch: int = 2,
     max_workers: int | None = None,
@@ -430,7 +469,8 @@ def batched_files(
             (``"a/b/"`` excludes the sibling ``a/bc/``), no slash keeps plain string-prefix
             semantics. See :func:`iter_keys`.
         n: max files per batch (``None`` = no count cap; pair with ``max_bytes`` for pure
-            size-based batching).
+            size-based batching). At least one of ``n`` and ``max_bytes`` must be set, and
+            each must be at least 1; other values raise ``ValueError``.
         max_bytes: max total bytes per batch. A single file larger than this forms its own batch.
         dir: download directory (RAM tmpfs by default).
         prefetch: how many batches to download ahead of the consumer (``0`` = fully sequential).
@@ -443,6 +483,7 @@ def batched_files(
     Yields:
         ``list[LoadedItem]`` for each batch (already on local disk).
     """
+    _check_batch_settings(n, max_bytes, prefetch)
     bucket_id, embedded_prefix = _parse_bucket(bucket)
     if keys is not None:
         remotes: list[BucketFile | str] = list(keys)
@@ -552,7 +593,8 @@ def completed_keys(
     """Scan parquet outputs and return the set of already-done keys (for cheap resume).
 
     Reads only ``column`` from every ``.parquet`` object under ``prefix`` in ``out_bucket``.
-    Returns an empty set if nothing is there yet.
+    Returns an empty set if nothing is there yet. A shard that cannot be read is skipped with a
+    warning; a readable shard without ``column`` raises ``ValueError``.
 
     ``prefix`` is a string prefix with a significant trailing ``/``: ``"out/run1/"`` scans that
     directory only, ``"out/run1"`` also scans a sibling ``out/run10/`` (see :func:`iter_keys`).
@@ -579,12 +621,22 @@ def completed_keys(
         if list_prefix and not item.path.startswith(list_prefix):
             continue  # Never treat sibling-run shards as completed work.
         full = f"{_BUCKET_PREFIX}{bucket_id}/{item.path}"
+        # pyarrow raises the same error type for a missing column and a corrupt shard, so the
+        # schema is checked first: only an unreadable shard is skipped.
         try:
             with fs.open(full, "rb") as fh:
-                table = pq.read_table(fh, columns=[column])
-            done.update(table.column(column).to_pylist())
+                shard = pq.ParquetFile(fh)
+                names = shard.schema_arrow.names
+                table = shard.read(columns=[column]) if column in names else None
         except Exception as exc:  # noqa: BLE001 - resume must tolerate a bad/partial shard
             logger.warning("completed_keys: could not read %s (%s)", item.path, exc)
+            continue
+        if table is None:
+            raise ValueError(
+                f"completed_keys: {item.path} has no column {column!r} (it has {names}). "
+                "Pass the column that holds your source keys as column=."
+            )
+        done.update(table.column(column).to_pylist())
     return done
 
 

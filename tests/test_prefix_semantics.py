@@ -10,11 +10,6 @@ so the directory assertions fail if the client-side guards are removed.
 
 from __future__ import annotations
 
-import sys
-from contextlib import contextmanager
-from types import SimpleNamespace
-
-import pytest
 from conftest import count_bb_dirs
 from fake_bucket import FakeBucket
 
@@ -101,45 +96,6 @@ def test_batched_files_prefix_no_slash(bucket: FakeBucket, tmp_path):
 
 
 # --- completed_keys(prefix=) --------------------------------------------------------------
-
-
-@pytest.fixture
-def fake_parquet(monkeypatch):
-    """Stand in for pyarrow + HfFileSystem so ``completed_keys`` runs offline without pyarrow.
-
-    Each ``<key>.parquet`` shard "contains" one ``__source_key`` equal to its own path, so the
-    returned set tells us exactly which shards were scanned.
-    """
-
-    class _Handle:
-        def __init__(self, path: str) -> None:
-            self.path = path
-
-    class _FS:
-        def __init__(self, *a, **k) -> None:
-            pass
-
-        @contextmanager
-        def open(self, full: str, mode: str = "rb"):
-            yield _Handle(full.removeprefix("hf://buckets/ns/b/"))
-
-    class _Table:
-        def __init__(self, vals: list[str]) -> None:
-            self._vals = vals
-
-        def column(self, name: str):
-            return SimpleNamespace(to_pylist=lambda: self._vals)
-
-    def read_table(fh: _Handle, columns=None):  # noqa: ANN001
-        return _Table([fh.path])
-
-    pq = SimpleNamespace(read_table=read_table)
-    # ``import pyarrow.parquet as pq`` binds via the parent's attribute, so both must agree.
-    monkeypatch.setitem(sys.modules, "pyarrow", SimpleNamespace(parquet=pq))
-    monkeypatch.setitem(sys.modules, "pyarrow.parquet", pq)
-    import huggingface_hub
-
-    monkeypatch.setattr(huggingface_hub, "HfFileSystem", _FS)
 
 
 SHARDS = ["out/r1/0.parquet", "out/r1/1.parquet", "out/r1/2.parquet", "out/r10/0.parquet"]
