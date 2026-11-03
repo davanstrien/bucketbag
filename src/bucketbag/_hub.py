@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import builtins
 import functools
+import heapq
 import json as _json
 import logging
 import os
@@ -259,6 +260,30 @@ def _download_batch(
     return _Batch(tmpdir, present)
 
 
+def _warn_if_scratch_is_small(
+    chunks: Iterable[list[BucketFile | str]], prefetch: int, base_dir: Path
+) -> None:
+    """Warn when the largest batches that can be on disk at once exceed the free space.
+
+    One streaming pass that keeps only the ``prefetch + 1`` largest batch sizes. Only sized
+    keys count, so string keys never warn.
+    """
+    sizes = (sum(getattr(r, "size", 0) or 0 for r in chunk) for chunk in chunks)
+    peak = sum(heapq.nlargest(prefetch + 1, sizes))
+    free = shutil.disk_usage(base_dir).free
+    if peak > free:
+        logger.warning(
+            "Up to %.2f GB of batches can be on %s at once (prefetch + 1 = %d batches), but "
+            "only %.2f GB is free. Lower max_bytes (n or batch_size) or prefetch, or pass dir= "
+            "on a larger disk. "
+            "/dev/shm is RAM, so running out there kills the process.",
+            peak / 1e9,
+            base_dir,
+            prefetch + 1,
+            free / 1e9,
+        )
+
+
 def _drain(ahead: deque[Future[_Batch]]) -> None:
     """Delete every queued batch: cancel downloads not started, then wait for the rest.
 
@@ -351,6 +376,8 @@ def batched_files(
 
     api = HfApi(token=token)
     base_dir = _resolve_dir(dir)
+    if any(isinstance(r, BucketFile) for r in remotes):  # only sized keys can warn
+        _warn_if_scratch_is_small(_pack(remotes, n, max_bytes), prefetch, base_dir)
     chunks = _pack(remotes, n, max_bytes)
 
     def fetch(chunk: list[BucketFile | str]) -> _Batch:

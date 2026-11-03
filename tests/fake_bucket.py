@@ -47,12 +47,15 @@ class FakeBucket:
     Failure switches:
         fail_download_on / fail_upload_on: 1-based call numbers, counted per method. That call
             raises ``FaultInjected`` (for downloads, ``download_error``) before it reads or
-            writes anything.
+            writes anything. Prefetch threads start downloads in parallel, so a call number
+            does not always name the same batch.
+        fail_download_keys: a download that includes one of these keys raises
+            ``download_error``: a fault on one known batch, whatever the thread order.
         partial_upload_on: that upload call stores the first half of its files, then raises
             ``FaultInjected``. The server applies the files of a batch that succeed and reports
             the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
-        download_seconds: each download call sleeps this long after writing its files, so a
-            test can interrupt the consumer while it waits.
+        list_seconds / download_seconds / upload_seconds: each call of that kind sleeps this
+            long, so a test can interrupt a wait or make that stage the slow one.
         missing: keys that a listing returns but that are gone by download time. As in the
             hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
             existence check (it downloads by content hash), so what the real hub does then is
@@ -74,8 +77,11 @@ class FakeBucket:
     fail_download_on: set[int] = field(default_factory=set)
     fail_upload_on: set[int] = field(default_factory=set)
     partial_upload_on: set[int] = field(default_factory=set)
+    list_seconds: float = 0.0
     download_seconds: float = 0.0
+    upload_seconds: float = 0.0
     download_error: type[BaseException] = FaultInjected
+    fail_download_keys: set[str] = field(default_factory=set)
     dirs_at_download: list[int] = field(default_factory=list)
     calls: Counter[str] = field(default_factory=Counter)
     list_prefixes: list[str | None] = field(default_factory=list)
@@ -124,6 +130,8 @@ class FakeBucket:
     ) -> Iterator[BucketFile | BucketFolder]:
         self._count("list")
         self.list_prefixes.append(prefix)
+        if self.list_seconds:
+            time.sleep(self.list_seconds)
         if not recursive:
             raise NotImplementedError("FakeBucket models recursive listings only")
         keys = self._matching_keys(bucket_id, prefix or "")
@@ -149,7 +157,8 @@ class FakeBucket:
             # Batch dirs on disk as this download starts, its own included (the high-water mark).
             batch_dir = Path(files[0][1]).parent
             self.dirs_at_download.append(len(list(batch_dir.parent.glob("bb-*"))))
-        if number in self.fail_download_on:
+        keys = [remote.path if isinstance(remote, BucketFile) else remote for remote, _ in files]
+        if number in self.fail_download_on or self.fail_download_keys.intersection(keys):
             raise self.download_error(f"download call #{number} failed")
         data = self.store.get(bucket_id, {})
         for remote, local in files:
@@ -185,6 +194,8 @@ class FakeBucket:
             staged = staged[: len(staged) // 2]
         self.store.setdefault(bucket_id, {}).update(staged)
         self.uploads.append((bucket_id, [dest for dest, _ in staged]))
+        if self.upload_seconds:
+            time.sleep(self.upload_seconds)
         if partial:
             raise FaultInjected(f"upload call #{number} stored {len(staged)} file(s), then failed")
 

@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import dataclass, replace
-from typing import Any, TypeVar, overload
+from typing import Any, Literal, TypeVar, overload
 
 from huggingface_hub import BucketFile
 
@@ -40,23 +40,86 @@ Output = tuple[str, bytes | str]
 # fn(items) -> Iterable[Output], or fn(items, ctx) when setup= is given.
 MapFn = Callable[..., Iterable[Output]]
 C = TypeVar("C")
+Stage = Literal["download", "map", "upload"]
+
+# What to change when a stage is the limit (BagStats.hint).
+_HINTS: dict[Stage, str] = {
+    "download": (
+        "Downloads are the limit: call boost() before the first download if the files are "
+        "small, or raise prefetch."
+    ),
+    "map": (
+        "The map function is the limit: raise batch_size if the model is under-filled, and "
+        "time decoding separately (README: 'Decode, not transport'); decode in a process pool "
+        "or at a smaller size."
+    ),
+    "upload": "Uploads are the limit: write fewer, larger outputs, or raise batch_size.",
+}
+
+# The shortest gap between two progress lines, in seconds (lines come after a batch).
+_PROGRESS_EVERY_S = 30.0
+
+
+def _shares(wait_s: float, map_s: float, upload_s: float) -> str:
+    """The time split as percentages, e.g. ``download wait 5%, map 90%, upload 5%``."""
+    total = (wait_s + map_s + upload_s) or 1.0
+    return (
+        f"download wait {wait_s / total:.0%}, map {map_s / total:.0%}, "
+        f"upload {upload_s / total:.0%}"
+    )
 
 
 @dataclass(frozen=True)
 class BagStats:
-    """What a :meth:`Bag.compute` run did."""
+    """What a :meth:`Bag.compute` run did, and where its time went.
+
+    ``wait_s`` is time spent waiting for the next batch (its download, plus deleting the last
+    batch's files), ``map_s`` time in the map function and ``upload_s`` time writing outputs.
+    ``bound_by`` names the largest of the three and ``hint`` the setting to change, so a person
+    or an agent can tune the next run. The three exclude ``setup()`` and listing; ``seconds``
+    includes them.
+    """
 
     processed: int
     skipped: int
     batches: int
     outputs: int
     seconds: float
+    wait_s: float = 0.0
+    map_s: float = 0.0
+    upload_s: float = 0.0
 
-    def __str__(self) -> str:  # human one-liner for print(bag.compute())
-        return (
+    @property
+    def bound_by(self) -> Stage | None:
+        """The stage that took the most time, or ``None`` when no batch ran."""
+        if not self.batches:
+            return None
+        times: dict[Stage, float] = {
+            "download": self.wait_s,
+            "map": self.map_s,
+            "upload": self.upload_s,
+        }
+        slowest: Stage = "download"
+        for stage, seconds in times.items():
+            if seconds > times[slowest]:
+                slowest = stage
+        return slowest
+
+    @property
+    def hint(self) -> str:
+        """One sentence naming the setting to change, or ``""`` when no batch ran."""
+        stage = self.bound_by
+        return _HINTS[stage] if stage is not None else ""
+
+    def __str__(self) -> str:  # print(bag.compute())
+        line = (
             f"{self.processed} processed (+{self.skipped} skipped as done) in "
             f"{self.batches} batches -> {self.outputs} outputs, {self.seconds:.1f}s"
         )
+        if self.bound_by is None:
+            return line
+        split = _shares(self.wait_s, self.map_s, self.upload_s)
+        return f"{line}\ntime: {split}; bound by {self.bound_by}. {self.hint}"
 
 
 def _with_context(
@@ -88,27 +151,57 @@ def _warn_if_not_done(batch: list[LoadedItem], pairs: list[Output], done: str) -
     return True
 
 
+def _log_progress(inputs: int, total: int, elapsed: float, split: str) -> None:
+    """Log inputs done out of ``total``, the rate, the time left and the time split."""
+    rate = inputs / elapsed if elapsed > 0 else 0.0
+    left = f", about {(total - inputs) / rate / 60:.0f} min left" if rate else ""
+    logger.info("%d/%d inputs, %.1f/s%s; time: %s", inputs, total, rate, left, split)
+
+
 def _run(
     apply: Callable[[list[LoadedItem]], Iterable[Output]],
     batches: Iterable[list[LoadedItem]],
     sink: Callable[[list[Output]], None],
     done: str | None,
-) -> tuple[int, int, int]:
-    """Map every batch and hand its outputs to ``sink``; return (inputs, batches, outputs).
+    total: int,
+) -> BagStats:
+    """Map every batch and hand its outputs to ``sink``, timing each stage.
 
-    Warns once per run about an input whose ``key + done`` output is missing.
+    Warns once per run about an input whose ``key + done`` output is missing, and logs a
+    progress line after a batch, at most every ``_PROGRESS_EVERY_S`` seconds.
     """
     inputs = count = outputs = 0
+    wait_s = map_s = upload_s = 0.0
     warned = False
-    for batch in batches:
+    started = last_log = waiting_since = time.monotonic()
+    for batch in batches:  # each step waits for the next download
+        t1 = time.monotonic()
         pairs = list(apply(batch))
-        if done is not None and not warned:
-            warned = _warn_if_not_done(batch, pairs, done)
+        t2 = time.monotonic()
         sink(pairs)
+        t3 = time.monotonic()
+        wait_s += t1 - waiting_since
+        map_s += t2 - t1
+        upload_s += t3 - t2
         inputs += len(batch)
         count += 1
         outputs += len(pairs)
-    return inputs, count, outputs
+        if done is not None and not warned:
+            warned = _warn_if_not_done(batch, pairs, done)
+        if t3 - last_log >= _PROGRESS_EVERY_S:
+            _log_progress(inputs, total, t3 - started, _shares(wait_s, map_s, upload_s))
+            last_log = t3
+        waiting_since = time.monotonic()
+    return BagStats(
+        processed=inputs,
+        skipped=0,
+        batches=count,
+        outputs=outputs,
+        seconds=time.monotonic() - started,
+        wait_s=wait_s,
+        map_s=map_s,
+        upload_s=upload_s,
+    )
 
 
 @dataclass(frozen=True)
@@ -228,7 +321,7 @@ class Bag:
         # Closed here, not left to garbage collection: a caller that keeps a raised exception
         # also keeps this frame, and with it the generator and its temp files.
         with closing(batches):
-            _run(apply, batches, outputs.extend, self.done)
+            _run(apply, batches, outputs.extend, self.done, total=len(files))
         return outputs
 
     def compute(
@@ -256,13 +349,19 @@ class Bag:
             )
         _check_batch_settings(self.batch_size, self.max_bytes, prefetch)
 
+        t0 = time.monotonic()  # BagStats.seconds covers listing and setup() too
         if resume and done is not None:
             todo, skipped = self._list_todo(out, done)
         else:
             todo, skipped = self._list_inputs(limit=self.limit), 0
-        if skipped:
-            logger.info("Bag.compute: %d inputs already done, %d to do", skipped, len(todo))
-        t0 = time.monotonic()
+        logger.info(
+            "Bag.compute: %d to do, %d already done; batch_size=%s, max_bytes=%s, prefetch=%d",
+            len(todo),
+            skipped,
+            self.batch_size,
+            self.max_bytes,
+            prefetch,
+        )
         apply = _with_context(fn, self.setup)
         batches = batched_files(
             self.src,
@@ -278,11 +377,7 @@ class Bag:
             put_files(pairs, out, token=self.token)
 
         with closing(batches):  # see take(): a kept exception must not keep the temp files
-            processed, count, outputs = _run(apply, batches, upload, done)
-        return BagStats(
-            processed=processed,
-            skipped=skipped,
-            batches=count,
-            outputs=outputs,
-            seconds=time.monotonic() - t0,
-        )
+            stats = _run(apply, batches, upload, done, total=len(todo))
+        stats = replace(stats, skipped=skipped, seconds=time.monotonic() - t0)
+        logger.info("Bag.compute: %s", stats)
+        return stats
