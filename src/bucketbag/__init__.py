@@ -18,8 +18,8 @@ scratch space), with optional prefetch overlap. It is **file-type agnostic**: a
             do_something(it.path)      # or it.bytes / it.image / it.text() / it.json()
         # <- this batch's files are auto-deleted as the loop advances
 
-This is **not a framework**: no Bag, no executors, no Jobs orchestration. It composes with
-plain ``for`` loops and ``toolz``.
+This is **not a framework**: no executors and no Jobs orchestration. The helpers compose with
+plain ``for`` loops; :class:`Bag` runs the same loop as a lazy plan.
 """
 
 from __future__ import annotations

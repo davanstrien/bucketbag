@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Backstop if a test hangs outside pytest-timeout's reach.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +38,9 @@ jobs:
       # uvx fetches from PyPI), keeping lint stable across releases and contributors.
       - name: Ruff
         run: uv run --no-sync ruff check .
+
+      - name: Ruff format
+        run: uv run --no-sync ruff format --check .
 
       - name: Type check
         run: uv run --no-sync ty check
