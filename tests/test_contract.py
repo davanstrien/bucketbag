@@ -9,13 +9,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import count_bb_dirs, gap, known_gap
 from fake_bucket import FakeBucket, FaultInjected
 
 import bucketbag
-from bucketbag import Bag, LoadedItem, batched_files, iter_keys, put_files
+from bucketbag import Bag, LoadedItem, batched_files, completed_keys, iter_keys, put_files
 
 SRC, OUT = "ns/src", "ns/out"
 PAGES = [f"pages/p{i}.jp2" for i in range(6)]
@@ -131,19 +132,19 @@ def test_output_under_a_run_prefix_marks_its_input_done(bucket: FakeBucket, tmp_
     assert run.compute(prefetch=0, dir=tmp_path).processed == 0
 
 
-@known_gap("an output key that does not start with its input key is not reported")
-def test_output_key_without_the_input_key_is_reported(
+def test_output_key_without_the_input_key_is_reported_once(
     bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def replace_extension(items: list[LoadedItem]) -> list[Output]:
         return [(it.key.removesuffix(".jp2") + ".md", b"text") for it in items]
 
-    bucket.seed(SRC, PAGES[:2])
-    run = Bag.from_bucket(SRC).map_batches(replace_extension).to_bucket(OUT)
+    bucket.seed(SRC, PAGES[:4])
+    run = Bag.from_bucket(SRC).map_batches(replace_extension, batch_size=2).to_bucket(OUT)
     with caplog.at_level(logging.WARNING, logger="bucketbag"):
         run.compute(prefetch=0, dir=tmp_path)
-    if not any("resume" in record.getMessage() for record in caplog.records):
-        gap("no warning that these outputs can never mark their inputs done")
+    warnings = [record for record in caplog.records if "resume" in record.getMessage()]
+    assert len(warnings) == 1  # two batches, one warning
+    assert "pages/p0.md" in warnings[0].getMessage()
 
 
 # --- 4. Failures --------------------------------------------------------------------------
@@ -267,34 +268,49 @@ def test_token_reaches_every_hub_call(bucket: FakeBucket, tmp_path: Path) -> Non
     assert {token for _, token in bucket.tokens} == {"hf_test"}
 
 
-@known_gap("batched_files does not refuse batch settings that cannot work")
-@pytest.mark.parametrize(("n", "max_bytes"), [(None, None), (0, None)])
-def test_unworkable_batch_settings_are_refused(
+@pytest.mark.parametrize(("n", "max_bytes"), [(None, None), (0, None), (None, 0)])
+def test_unworkable_batch_bounds_are_refused_before_listing(
     bucket: FakeBucket, tmp_path: Path, n: int | None, max_bytes: int | None
 ) -> None:
-    files = bucket.seed(SRC, PAGES)
-    try:
-        sizes = [
-            len(b) for b in batched_files(SRC, keys=files, n=n, max_bytes=max_bytes, dir=tmp_path)
-        ]
-    except ValueError:
-        return
-    gap(f"n={n}, max_bytes={max_bytes} ran with batch sizes {sizes}")
+    bucket.seed(SRC, PAGES)
+    with pytest.raises(ValueError):
+        next(batched_files(SRC, n=n, max_bytes=max_bytes, dir=tmp_path))
+    with pytest.raises(ValueError):
+        Bag.from_bucket(SRC).map_batches(upper_md, batch_size=n, max_bytes=max_bytes)
+    assert bucket.calls["list"] == 0
 
 
-@known_gap("without setup=, a keyword-only parameter makes bucketbag pass None positionally")
+def test_negative_prefetch_is_refused(bucket: FakeBucket, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="prefetch"):
+        next(batched_files(SRC, prefetch=-1, dir=tmp_path))
+
+
 def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Path) -> None:
     def fn(items: list[LoadedItem], *, suffix: str = ".md") -> Iterable[Output]:
         return [(it.key + suffix, b"x") for it in items]
 
     bucket.seed(SRC, PAGES[:1])
-    try:
-        Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
-    except TypeError as error:
-        if "positional argument" not in str(error):
-            raise
-        gap(f"fn(items, *, suffix=...) failed: {error}")
+    Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
     assert bucket.keys(OUT) == ["pages/p0.jp2.md"]
+
+
+def test_completed_keys_refuses_a_shard_without_the_column(
+    bucket: FakeBucket, fake_parquet: SimpleNamespace
+) -> None:
+    bucket.seed(OUT, ["run/part-0.parquet"])
+    fake_parquet.columns = ["source_key"]
+    with pytest.raises(ValueError, match="__source_key"):
+        completed_keys(OUT)
+
+
+def test_completed_keys_skips_an_unreadable_shard(
+    bucket: FakeBucket, fake_parquet: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    bucket.seed(OUT, ["run/part-0.parquet", "run/part-1.parquet"])
+    fake_parquet.unreadable.add("run/part-1.parquet")
+    with caplog.at_level(logging.WARNING, logger="bucketbag"):
+        assert completed_keys(OUT) == {"run/part-0.parquet"}
+    assert any("part-1" in record.getMessage() for record in caplog.records)
 
 
 # --- Public names -------------------------------------------------------------------------

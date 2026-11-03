@@ -28,21 +28,31 @@ plan object later.
 from __future__ import annotations
 
 import bisect
-import inspect
 import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeVar, overload
 
 from huggingface_hub import BucketFile
 
-from . import _list_bucketfiles, _parse_bucket, batched_files, iter_keys, logger, put_files
+from . import (
+    LoadedItem,
+    _check_batch_bounds,
+    _list_bucketfiles,
+    _parse_bucket,
+    batched_files,
+    iter_keys,
+    logger,
+    put_files,
+)
 
 __all__ = ["Bag", "BagStats"]
 
-# fn(items) -> Iterable[(key, bytes|str)], or fn(items, ctx) when setup= is given.
-MapFn = Callable[..., Iterable[tuple[str, "bytes | str"]]]
+Output = tuple[str, bytes | str]
+# fn(items) -> Iterable[Output], or fn(items, ctx) when setup= is given.
+MapFn = Callable[..., Iterable[Output]]
+C = TypeVar("C")
 
 
 @dataclass(frozen=True)
@@ -62,15 +72,25 @@ class BagStats:
         )
 
 
-def _call_fn(fn: MapFn, items: list, ctx: Any, has_setup: bool) -> Iterable[tuple[str, Any]]:
-    if has_setup:
-        return fn(items, ctx)
-    # Allow fn(items) or fn(items, ctx=None) signatures without setup.
-    try:
-        sig_params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):  # builtins / C callables
-        return fn(items)
-    return fn(items, None) if len(sig_params) >= 2 else fn(items)
+def _with_context(
+    fn: MapFn, setup: Callable[[], Any] | None
+) -> Callable[[list[LoadedItem]], Iterable[Output]]:
+    """Return the map function as ``f(items)``: ``fn`` itself, or ``fn(items, setup())``.
+
+    ``setup`` runs here, once. The function's signature is never inspected.
+    """
+    if setup is None:
+        return fn
+    ctx = setup()
+    return lambda items: fn(items, ctx)
+
+
+def _unmatched_output(pairs: list[Output], items: list[LoadedItem]) -> str | None:
+    """The first output key that starts with no input key of its batch, else ``None``."""
+    for key, _ in pairs:
+        if not any(key.startswith(item.key) for item in items):
+            return key
+    return None
 
 
 @dataclass(frozen=True)
@@ -102,6 +122,26 @@ class Bag:
         """Start a plan over ``bucket`` (``ns/bucket[/prefix]`` or ``hf://buckets/...``)."""
         return cls(src=bucket, include=include, exclude=exclude, limit=limit, token=token)
 
+    @overload
+    def map_batches(
+        self,
+        fn: Callable[[list[LoadedItem]], Iterable[Output]],
+        *,
+        batch_size: int | None = 32,
+        max_bytes: int | None = None,
+        setup: None = None,
+    ) -> Bag: ...
+
+    @overload
+    def map_batches(
+        self,
+        fn: Callable[[list[LoadedItem], C], Iterable[Output]],
+        *,
+        batch_size: int | None = 32,
+        max_bytes: int | None = None,
+        setup: Callable[[], C],
+    ) -> Bag: ...
+
     def map_batches(
         self,
         fn: MapFn,
@@ -110,11 +150,14 @@ class Bag:
         max_bytes: int | None = None,
         setup: Callable[[], Any] | None = None,
     ) -> Bag:
-        """Set the per-batch fn: ``fn(items[, ctx]) -> iterable[(key, bytes|str)]``.
+        """Set the per-batch function: ``fn(items) -> iterable[(key, bytes|str)]``.
 
-        ``setup`` (e.g. a model loader) runs **once per compute** and its result is passed to
-        every ``fn`` call. ``batch_size``/``max_bytes`` bound each batch by count/total bytes.
+        With ``setup`` (e.g. a model loader), ``setup()`` runs once per ``compute()`` or
+        ``take()``, and ``fn`` is called as ``fn(items, ctx)`` with its result.
+        ``batch_size``/``max_bytes`` bound each batch by file count/total bytes; at least one
+        must be set, and each must be at least 1.
         """
+        _check_batch_bounds(batch_size, max_bytes)
         return replace(self, fn=fn, setup=setup, batch_size=batch_size, max_bytes=max_bytes)
 
     def to_bucket(self, out: str) -> Bag:
@@ -154,17 +197,24 @@ class Bag:
         todo = [f for f in files if not is_done(f.path)]
         return todo, len(files) - len(todo)
 
-    def take(self, n: int, *, dir: str | os.PathLike[str] | None = None) -> list[tuple[str, Any]]:
+    def take(self, n: int, *, dir: str | os.PathLike[str] | None = None) -> list[Output]:
         """Dev peek: run the plan on the first ``n`` items and return the outputs. No writes."""
-        if self.fn is None:
+        fn = self.fn
+        if fn is None:
             raise ValueError("take() needs a map_batches(fn) stage")
         files = self._list_inputs(limit=n)
-        ctx = self.setup() if self.setup is not None else None
-        outputs: list[tuple[str, Any]] = []
+        apply = _with_context(fn, self.setup)
+        outputs: list[Output] = []
         for batch in batched_files(
-            self.src, keys=files, n=self.batch_size, prefetch=0, dir=dir, token=self.token
+            self.src,
+            keys=files,
+            n=self.batch_size,
+            max_bytes=self.max_bytes,
+            prefetch=0,
+            dir=dir,
+            token=self.token,
         ):
-            outputs.extend(_call_fn(self.fn, batch, ctx, self.setup is not None))
+            outputs.extend(apply(batch))
         return outputs
 
     def compute(
@@ -179,7 +229,8 @@ class Bag:
         Bounded scratch (via :func:`batched_files`), one ``put_files`` call per batch, and
         resume-by-output-existence — safe to kill and re-run.
         """
-        if self.fn is None:
+        fn = self.fn
+        if fn is None:
             raise ValueError("compute() needs a map_batches(fn) stage")
         if self.out is None:
             raise ValueError("compute() needs a to_bucket(out) stage")
@@ -188,8 +239,9 @@ class Bag:
         if skipped:
             logger.info("Bag.compute: %d inputs already done, %d to do", skipped, len(todo))
         t0 = time.monotonic()
-        ctx = self.setup() if self.setup is not None else None
+        apply = _with_context(fn, self.setup)
         processed = batches = outputs = 0
+        warned = False
         for batch in batched_files(
             self.src,
             keys=todo,
@@ -199,7 +251,16 @@ class Bag:
             dir=dir,
             token=self.token,
         ):
-            pairs = list(_call_fn(self.fn, batch, ctx, self.setup is not None))
+            pairs = list(apply(batch))
+            orphan = None if warned else _unmatched_output(pairs, batch)
+            if orphan is not None:
+                logger.warning(
+                    "Output key %r does not start with an input key of its batch, so resume "
+                    "cannot mark that input done and it runs again on every re-run. Name each "
+                    "output <input key><suffix>, e.g. 'pages/p1.jp2.md'.",
+                    orphan,
+                )
+                warned = True
             put_files(pairs, self.out, token=self.token)
             processed += len(batch)
             batches += 1
