@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from conftest import count_bb_dirs, gap, known_gap
@@ -285,6 +286,18 @@ def test_unworkable_batch_bounds_are_refused_before_listing(
         next(batched_files(SRC, n=n, max_bytes=max_bytes, dir=tmp_path))
     with pytest.raises(ValueError):
         Bag.from_bucket(SRC).map_batches(upper_md, batch_size=n, max_bytes=max_bytes)
+    assert bucket.calls["list"] == 0
+
+
+@pytest.mark.parametrize(
+    ("n", "max_bytes", "prefetch"),
+    [(True, None, 2), (2.5, None, 2), (None, float("nan"), 2), (4, None, 1.5)],
+)
+def test_batch_settings_must_be_whole_numbers(
+    bucket: FakeBucket, tmp_path: Path, n: Any, max_bytes: Any, prefetch: Any
+) -> None:
+    with pytest.raises(TypeError, match="whole number"):
+        next(batched_files(SRC, n=n, max_bytes=max_bytes, prefetch=prefetch, dir=tmp_path))
     assert bucket.calls["list"] == 0
 
 

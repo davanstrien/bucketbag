@@ -70,9 +70,10 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 - `batch_size` caps a batch's file count and `max_bytes` its total size; a single file larger
   than `max_bytes` forms its own batch. `max_bytes` with string keys raises `ValueError`:
   string keys carry no size.
-- Settings that cannot work raise `ValueError` before anything is listed: at least one of
-  `n` (`batch_size` in `Bag`) and `max_bytes` must be set, each at least 1, and `prefetch` must
-  be 0 or more. `Bag.map_batches` checks its bounds when the plan is built.
+- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`),
+  `max_bytes` and `prefetch` must be whole numbers (a bool or a float raises `TypeError`). At
+  least one of `n` and `max_bytes` must be set, each at least 1, and `prefetch` must be 0 or
+  more (`ValueError`). `Bag.map_batches` checks its bounds when the plan is built.
 - The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given. Its
   signature is not inspected.
 - `completed_keys` skips a shard it cannot read, with a warning. A readable shard without

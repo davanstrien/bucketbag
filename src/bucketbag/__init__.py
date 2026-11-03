@@ -27,6 +27,7 @@ from __future__ import annotations
 import builtins
 import json as _json
 import logging
+import numbers
 import os
 import re
 import shutil
@@ -362,6 +363,12 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 def _check_batch_settings(n: int | None, max_bytes: int | None, prefetch: int = 0) -> None:
     """Refuse batch settings that cannot work, before anything is listed or downloaded."""
+    for name, value in (("n", n), ("max_bytes", max_bytes), ("prefetch", prefetch)):
+        # A bool is an int to Python, and a float such as nan compares False with everything.
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, numbers.Integral)
+        ):
+            raise TypeError(f"{name} must be a whole number, got {value!r}.")
     if n is None and max_bytes is None:
         raise ValueError(
             "Batches need a bound: set the file count (n / batch_size), max_bytes, or both. "
