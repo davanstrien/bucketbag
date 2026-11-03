@@ -41,17 +41,17 @@ _LITERAL = st.characters(blacklist_categories=("Cs",), blacklist_characters="*?[
         ("a.txt", "aXtxt", False),
     ],
 )
-def test_glob_to_re_cases(pattern, key, matches):
+def test_glob_to_re_cases(pattern: str, key: str, matches: bool) -> None:
     assert bool(_glob_to_re(pattern).match(key)) is matches
 
 
 @pytest.mark.parametrize("pattern", ["a**z", "**.jp2", "pages/**.md"])
-def test_double_star_inside_a_name_is_refused(pattern):
+def test_double_star_inside_a_name_is_refused(pattern: str) -> None:
     with pytest.raises(ValueError, match="own path segment"):
         _glob_to_re(pattern)
 
 
-def test_glob_to_re_cache_returns_same_object():
+def test_glob_to_re_cache_returns_same_object() -> None:
     a = _glob_to_re("*.bin")
     b = _glob_to_re("*.bin")
     assert a is b  # cached
@@ -70,19 +70,19 @@ def test_glob_to_re_cache_returns_same_object():
         ("data/*.csv", "data/"),
     ],
 )
-def test_glob_prefix_cases(pattern, expected):
+def test_glob_prefix_cases(pattern: str, expected: str) -> None:
     assert _glob_prefix(pattern) == expected
 
 
 # --- properties -------------------------------------------------------------
 @given(st.text(min_size=1, max_size=16, alphabet=st.characters(blacklist_categories=("Cs",))))
-def test_glob_prefix_never_contains_wildcards(pattern):
+def test_glob_prefix_never_contains_wildcards(pattern: str) -> None:
     prefix = _glob_prefix(pattern)
     assert not set(prefix) & {"*", "?", "["}
 
 
 @given(st.text(min_size=1, max_size=12, alphabet=_LITERAL))
-def test_literal_pattern_matches_only_itself(literal):
+def test_literal_pattern_matches_only_itself(literal: str) -> None:
     rx = _glob_to_re(literal)
     assert rx.match(literal)
     assert not rx.match(literal + "x")
@@ -95,7 +95,7 @@ _LITERAL_PATH = st.lists(_LITERAL_SEG, min_size=1, max_size=4).map("/".join)
 
 
 @given(_LITERAL_PATH)
-def test_glob_prefix_is_everything_up_to_last_slash(path):
+def test_glob_prefix_is_everything_up_to_last_slash(path: str) -> None:
     # With no wildcard, the prefix is the literal head up to (and including) the final "/".
     prefix = _glob_prefix(path)
     assert path.startswith(prefix)

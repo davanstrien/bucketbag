@@ -14,26 +14,26 @@ from fake_bucket import FakeBucket
 from bucketbag import iter_keys
 
 
-def test_iter_keys_returns_sorted(bucket: FakeBucket):
+def test_iter_keys_returns_sorted(bucket: FakeBucket) -> None:
     # The listing arrives in reverse lexical order; iter_keys must return the keys sorted.
     bucket.listing_order = "reversed"
     bucket.seed("ns/bucket", ["b/2.txt", "a/1.txt", "a/10.txt", "a/2.txt"])
     assert list(iter_keys("ns/bucket")) == ["a/1.txt", "a/10.txt", "a/2.txt", "b/2.txt"]
 
 
-def test_iter_keys_applies_include_glob(bucket: FakeBucket):
+def test_iter_keys_applies_include_glob(bucket: FakeBucket) -> None:
     bucket.seed("ns/bucket", ["a/1.jp2", "a/2.txt", "a/3.jp2"])
     assert list(iter_keys("ns/bucket", include="**/*.jp2")) == ["a/1.jp2", "a/3.jp2"]
 
 
-def test_iter_keys_skips_non_files(bucket: FakeBucket):
+def test_iter_keys_skips_non_files(bucket: FakeBucket) -> None:
     # The listing also yields a BucketFolder for "a"; it must be dropped before sorting/yielding.
     bucket.folders = True
     bucket.seed("ns/bucket", ["a/1.txt"])
     assert list(iter_keys("ns/bucket")) == ["a/1.txt"]
 
 
-def test_iter_keys_objects_yields_bucketfile(bucket: FakeBucket):
+def test_iter_keys_objects_yields_bucketfile(bucket: FakeBucket) -> None:
     # objects=True yields the BucketFile objects (with .size) instead of key strings, so they
     # can be fed to batched_files(keys=..., max_bytes=...) where sizes are required.
     bucket.put("ns/bucket", "a/1.jp2", data=b"x" * 7)

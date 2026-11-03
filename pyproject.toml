@@ -1,12 +1,23 @@
 [project]
 name = "bucketbag"
-version = "0.3.1"
+version = "0.4.0"
 description = "A minimal, toolz-style helper for batched, bounded-memory access to Hugging Face bucket files."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Daniel van Strien" }]
 keywords = ["huggingface", "buckets", "batch", "toolz", "dataset"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
 dependencies = [
     # 1.21: parse_hf_uri reads Hub web URLs (1.13 rejects them).
     "huggingface-hub>=1.21",
@@ -28,15 +39,27 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bucketbag"]
 
+[tool.hatch.build.targets.sdist]
+# Only what a source build and its tests need; never local venvs or experiment outputs.
+include = ["src", "tests", "README.md", "CHANGELOG.md", "CONTRACT.md", "LICENSE", "pyproject.toml"]
+
 [tool.ruff]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# ANN: the package and its tests are fully typed. C90/PLR09: a complexity ratchet; no function
+# may grow past these limits.
+select = ["E", "F", "I", "UP", "B", "ANN", "C90", "PLR0912", "PLR0915"]
+# Any is deliberate where the type is the caller's (LoadedItem.json(), setup() results).
+ignore = ["ANN401"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
-# experiments vendor engine code from uv-scripts-for-ai recipes unchanged
-"experiments/**" = ["B905"]
+# Scripts, not library code: examples measure things, experiments vendor recipe code unchanged.
+"examples/**" = ["ANN", "C90", "PLR"]
+"experiments/**" = ["B905", "ANN", "C90", "PLR"]
 
 [tool.ty.src]
 include = ["src", "tests"]

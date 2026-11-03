@@ -7,6 +7,8 @@ more thoroughly than hand-written cases.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import pytest
 from conftest import bf
 from huggingface_hub import BucketFile
@@ -18,8 +20,13 @@ from bucketbag._core import _pack
 pytestmark = pytest.mark.internals
 
 
-def paths(batches):
-    return [[f.path for f in b] for b in batches]
+def key(f: BucketFile | str) -> str:
+    """The key of one packed item: a string key itself, or a ``BucketFile``'s path."""
+    return f if isinstance(f, str) else f.path
+
+
+def paths(batches: Iterable[list[BucketFile | str]]) -> list[list[str]]:
+    return [[key(f) for f in b] for b in batches]
 
 
 def size(f: BucketFile | str) -> int:
@@ -29,7 +36,7 @@ def size(f: BucketFile | str) -> int:
 
 
 # --- concrete cases ---------------------------------------------------------
-def test_pack_count_only():
+def test_pack_count_only() -> None:
     items = [bf(f"f{i}.bin", size=1) for i in range(7)]
     assert paths(_pack(items, n=3, max_bytes=None)) == [
         ["f0.bin", "f1.bin", "f2.bin"],
@@ -38,13 +45,13 @@ def test_pack_count_only():
     ]
 
 
-def test_pack_bytes_only():
+def test_pack_bytes_only() -> None:
     items = [bf("a", size=10), bf("b", size=10), bf("c", size=10), bf("d", size=10)]
     # cap 25 -> [a,b]=20 (next would be 30>25), [c,d]=20
     assert paths(_pack(items, n=None, max_bytes=25)) == [["a", "b"], ["c", "d"]]
 
 
-def test_pack_single_file_larger_than_max_bytes_is_own_batch():
+def test_pack_single_file_larger_than_max_bytes_is_own_batch() -> None:
     items = [bf("a", size=10), bf("huge", size=1000), bf("b", size=10)]
     batches = list(_pack(items, n=None, max_bytes=50))
     assert paths(batches) == [["a"], ["huge"], ["b"]]
@@ -52,17 +59,17 @@ def test_pack_single_file_larger_than_max_bytes_is_own_batch():
     assert sum(size(f) for f in batches[1]) > 50
 
 
-def test_pack_empty():
+def test_pack_empty() -> None:
     assert list(_pack([], n=3, max_bytes=10)) == []
 
 
-def test_pack_count_and_bytes_whichever_first():
+def test_pack_count_and_bytes_whichever_first() -> None:
     # n=10 won't bind (only 3 files); max_bytes=20 binds at 3 files of size 7 (21 > 20).
     items = [bf("a", 7), bf("b", 7), bf("c", 7), bf("d", 7)]
     assert paths(_pack(items, n=10, max_bytes=20)) == [["a", "b"], ["c", "d"]]
 
 
-def test_pack_unknown_size_counts_as_zero():
+def test_pack_unknown_size_counts_as_zero() -> None:
     # A string key has no `.size` -> getattr(...,0) -> 0; never triggers the bytes cap.
     items = [f"f{i}" for i in range(4)]
     assert len(list(_pack(items, n=None, max_bytes=1))) == 1  # all zero-size -> one batch
@@ -78,32 +85,34 @@ sizes_st = st.lists(
 caps_st = st.one_of(st.none(), st.integers(min_value=1, max_value=2000))
 
 
-def _flatten(batches):
+def _flatten(batches: Iterable[list[BucketFile | str]]) -> list[BucketFile | str]:
     return [f for b in batches for f in b]
 
 
 @given(sizes=sizes_st, n=caps_st, max_bytes=caps_st)
-def test_pack_preserves_order(sizes, n, max_bytes):
+def test_pack_preserves_order(sizes: list[int], n: int | None, max_bytes: int | None) -> None:
     items = [bf(f"k{i}", size=s) for i, s in enumerate(sizes)]
     out = _flatten(_pack(items, n, max_bytes))
-    assert [f.path for f in out] == [f"k{i}" for i in range(len(sizes))]
+    assert [key(f) for f in out] == [f"k{i}" for i in range(len(sizes))]
 
 
 @given(sizes=sizes_st, n=caps_st, max_bytes=caps_st)
-def test_pack_no_empty_batches(sizes, n, max_bytes):
+def test_pack_no_empty_batches(sizes: list[int], n: int | None, max_bytes: int | None) -> None:
     batches = list(_pack([bf(f"k{i}", s) for i, s in enumerate(sizes)], n, max_bytes))
     assert all(len(b) >= 1 for b in batches)
 
 
 @given(sizes=sizes_st, n=caps_st, max_bytes=caps_st)
-def test_pack_count_cap_respected(sizes, n, max_bytes):
+def test_pack_count_cap_respected(sizes: list[int], n: int | None, max_bytes: int | None) -> None:
     batches = list(_pack([bf(f"k{i}", s) for i, s in enumerate(sizes)], n, max_bytes))
     if n is not None:
         assert all(len(b) <= n for b in batches)
 
 
 @given(sizes=sizes_st, max_bytes=st.integers(min_value=1, max_value=2000))
-def test_pack_bytes_cap_respected_except_oversize_singletons(sizes, max_bytes):
+def test_pack_bytes_cap_respected_except_oversize_singletons(
+    sizes: list[int], max_bytes: int
+) -> None:
     # n is irrelevant to the bytes invariant, so leave it None.
     batches = list(_pack([bf(f"k{i}", s) for i, s in enumerate(sizes)], None, max_bytes))
     for b in batches:
@@ -115,7 +124,7 @@ def test_pack_bytes_cap_respected_except_oversize_singletons(sizes, max_bytes):
 
 
 @given(sizes=sizes_st, max_bytes=st.integers(min_value=1, max_value=2000))
-def test_pack_greedy_correctness(sizes, max_bytes):
+def test_pack_greedy_correctness(sizes: list[int], max_bytes: int) -> None:
     """Every batch is maximal: appending the first file of the *next* batch would overflow it
     (unless the batch is a single oversize file, or the next file is itself oversize)."""
     items = [bf(f"k{i}", s) for i, s in enumerate(sizes)]

@@ -14,7 +14,7 @@ from bucketbag import LoadedItem
 
 
 @pytest.mark.internals
-def test_bytes_reads_and_caches(tmp_path: Path):
+def test_bytes_reads_and_caches(tmp_path: Path) -> None:
     f = tmp_path / "x.bin"
     f.write_bytes(b"payload")
     it = LoadedItem(key="k", path=f)
@@ -26,34 +26,34 @@ def test_bytes_reads_and_caches(tmp_path: Path):
     assert it.bytes == b"payload"
 
 
-def test_text_decodes(tmp_path: Path):
+def test_text_decodes(tmp_path: Path) -> None:
     f = tmp_path / "x.txt"
     f.write_text("héllo, world", encoding="utf-8")
     it = LoadedItem(key="k", path=f)
     assert it.text() == "héllo, world"
 
 
-def test_text_custom_encoding(tmp_path: Path):
+def test_text_custom_encoding(tmp_path: Path) -> None:
     f = tmp_path / "x.txt"
     f.write_bytes("café".encode("latin-1"))
     assert LoadedItem(key="k", path=f).text(encoding="latin-1") == "café"
 
 
-def test_json_parses(tmp_path: Path):
+def test_json_parses(tmp_path: Path) -> None:
     f = tmp_path / "x.json"
     obj = {"a": 1, "b": [2, 3], "c": {"nested": True}}
     f.write_text(json.dumps(obj))
     assert LoadedItem(key="k", path=f).json() == obj
 
 
-def test_json_invalid_raises(tmp_path: Path):
+def test_json_invalid_raises(tmp_path: Path) -> None:
     f = tmp_path / "x.json"
     f.write_text("not json")
     with pytest.raises(json.JSONDecodeError):
         LoadedItem(key="k", path=f).json()
 
 
-def test_image_opens_pil(tmp_path: Path):
+def test_image_opens_pil(tmp_path: Path) -> None:
     from PIL import Image
 
     f = tmp_path / "x.png"

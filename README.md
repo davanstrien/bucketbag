@@ -17,11 +17,12 @@ your control. Not faster than the raw API (same transport), and not a framework.
 
 ```toml
 # /// script
-# dependencies = ["bucketbag @ https://github.com/davanstrien/bucketbag/archive/refs/tags/v0.3.1.tar.gz"]
+# dependencies = ["bucketbag==0.4.0"]
 # ///
 ```
 
-Pin a tag — HEAD moves.
+Or `pip install bucketbag`. Pin a version: bucketbag is experimental and 0.x releases break.
+[CHANGELOG.md](CHANGELOG.md) says how to move from 0.3.
 
 ## The read loop
 
@@ -79,8 +80,17 @@ lines, so they show up in `hf jobs logs`, until your script configures logging; 
 handlers get them.
 
 Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
-(`pages/p10.md` never marks `pages/p1` done). `compute()`
-runs in-process today; fanning the same plan across HF Jobs (one shard per job) is the next layer.
+(`pages/p10.md` never marks `pages/p1` done). `compute()` runs in-process today; fanning the same
+plan across HF Jobs (one shard per job) is the next layer.
+
+To follow a bucket that another job is still filling, re-run the plan; each pass lists the
+bucket again and skips what is done:
+
+```python
+while producer_running():
+    bag.compute()
+    time.sleep(60)
+```
 [CONTRACT.md](CONTRACT.md) states what bucketbag promises; the tests check each rule.
 
 ## API
