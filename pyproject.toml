@@ -41,7 +41,15 @@ packages = ["src/bucketbag"]
 
 [tool.hatch.build.targets.sdist]
 # Only what a source build and its tests need; never local venvs or experiment outputs.
-include = ["src", "tests", "README.md", "CHANGELOG.md", "CONTRACT.md", "LICENSE", "pyproject.toml"]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRACT.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100

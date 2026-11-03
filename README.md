@@ -22,7 +22,7 @@ your control. Not faster than the raw API (same transport), and not a framework.
 ```
 
 Or `pip install bucketbag`. Pin a version: bucketbag is experimental and 0.x releases break.
-[CHANGELOG.md](CHANGELOG.md) says how to move from 0.3.
+[CHANGELOG.md](https://github.com/davanstrien/bucketbag/blob/main/CHANGELOG.md) says how to move from 0.3.
 
 ## The read loop
 
@@ -90,8 +90,10 @@ bucket again and skips what is done:
 while producer_running():
     bag.compute()
     time.sleep(60)
+bag.compute()  # once more: files may have landed during the last sleep
 ```
-[CONTRACT.md](CONTRACT.md) states what bucketbag promises; the tests check each rule.
+
+[CONTRACT.md](https://github.com/davanstrien/bucketbag/blob/main/CONTRACT.md) states what bucketbag promises; the tests check each rule.
 
 ## API
 

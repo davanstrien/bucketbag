@@ -27,6 +27,8 @@ agents. First release on PyPI: `pip install bucketbag`.
 - **`completed_keys` raises when a readable shard lacks `column=`** (before, every read error
   became a warning, so a wrong column silently re-ran everything).
 - **`batched_files(max_workers=)` is removed**; `prefetch` sets the number of download threads.
+- **`LoadedItem` is frozen.** Assigning to `item.key` or `item.path` raises
+  `FrozenInstanceError`; build a new `LoadedItem(key=..., path=...)` instead.
 - **Dependency floors:** `huggingface-hub>=1.21`, `fsspec>=2023.12`.
 
 ### New
