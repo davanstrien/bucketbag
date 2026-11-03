@@ -71,6 +71,7 @@ bag.compute()      # list -> skip done -> download -> fn -> put_files; kill + re
 
 Resume contract: an input is done iff an output key **starts with** its source key. `compute()`
 runs in-process today; fanning the same plan across HF Jobs (one shard per job) is the next layer.
+[CONTRACT.md](CONTRACT.md) states what bucketbag promises, and marks the rules it still breaks.
 
 ## API
 

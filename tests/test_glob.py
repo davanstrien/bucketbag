@@ -8,6 +8,8 @@ from hypothesis import strategies as st
 
 from bucketbag import _glob_prefix, _glob_to_re
 
+pytestmark = pytest.mark.internals
+
 # A "literal" alphabet: any chars except the glob metacharacters and surrogate/whitespace noise.
 _LITERAL = st.characters(blacklist_categories=("Cs",), blacklist_characters="*?[ \t\n/")
 

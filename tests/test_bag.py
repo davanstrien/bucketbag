@@ -1,39 +1,16 @@
 """Tests for the ``Bag`` plan (P0: local compute only).
 
-Fully offline: listing (``HfApi.list_bucket_tree``), download (``download_bucket_files``) and
-write (``batch_bucket_files``) are all monkeypatched. The fake bucket store maps bucket_id ->
-list[BucketFile], so source and output buckets can be listed independently (resume tests).
+Fully offline: the ``bucket`` fixture (``FakeBucket``) serves listings, downloads and writes
+from one in-memory store. Source and output buckets are separate entries in that store, so the
+resume tests seed outputs in ``ns/out`` and read what ``compute`` wrote back from it.
 """
 
 from __future__ import annotations
 
 import pytest
-from conftest import bf, make_fake_download
-from huggingface_hub import HfApi
+from fake_bucket import FakeBucket
 
 from bucketbag import Bag, BagStats
-
-
-@pytest.fixture
-def fake_hub(monkeypatch):
-    """A fake Hub: per-bucket listings, materializing downloads, captured writes.
-
-    Returns a dict with ``listings`` (bucket_id -> list[BucketFile], mutable) and ``writes``
-    (list of (bucket_id, add-pairs) captured from batch_bucket_files).
-    """
-    state = {"listings": {}, "writes": [], "list_calls": 0}
-
-    def fake_list(self, bucket_id, prefix=None, recursive=None, token=None):  # noqa: ANN001
-        state["list_calls"] += 1
-        yield from state["listings"].get(bucket_id, [])
-
-    def fake_batch(self, bucket_id, *, add=None, token=None, **kwargs):  # noqa: ANN001
-        state["writes"].append((bucket_id, list(add or [])))
-
-    monkeypatch.setattr(HfApi, "list_bucket_tree", fake_list)
-    monkeypatch.setattr(HfApi, "download_bucket_files", make_fake_download())
-    monkeypatch.setattr(HfApi, "batch_bucket_files", fake_batch)
-    return state
 
 
 def _upper_md(items):
@@ -41,16 +18,16 @@ def _upper_md(items):
     return [(it.key + ".md", it.bytes.decode().upper()) for it in items]
 
 
-def test_chain_is_lazy_and_immutable(fake_hub):
+def test_chain_is_lazy_and_immutable(bucket: FakeBucket):
     base = Bag.from_bucket("ns/src", include="**/*.bin")
     mapped = base.map_batches(_upper_md, batch_size=2)
     final = mapped.to_bucket("ns/out")
     assert base.fn is None and mapped.out is None and final.out == "ns/out"
-    assert fake_hub["list_calls"] == 0  # nothing touched the "network" yet
+    assert bucket.calls["list"] == 0  # nothing touched the "network" yet
 
 
-def test_compute_end_to_end(fake_hub, tmp_path):
-    fake_hub["listings"]["ns/src"] = [bf(f"pages/p{i}.bin", size=4) for i in range(5)]
+def test_compute_end_to_end(bucket: FakeBucket, tmp_path):
+    bucket.seed("ns/src", [f"pages/p{i}.bin" for i in range(5)], data=b"xxxx")
     stats = (
         Bag.from_bucket("ns/src", include="**/*.bin")
         .map_batches(_upper_md, batch_size=2)
@@ -60,16 +37,17 @@ def test_compute_end_to_end(fake_hub, tmp_path):
     assert isinstance(stats, BagStats)
     assert (stats.processed, stats.skipped, stats.batches, stats.outputs) == (5, 0, 3, 5)
     # one put_files call per batch, to the right bucket, with derived keys + content
-    assert [w[0] for w in fake_hub["writes"]] == ["ns/out"] * 3
-    all_pairs = [p for _, pairs in fake_hub["writes"] for p in pairs]
-    assert all_pairs[0] == (b"XXXX", "pages/p0.bin.md")
-    assert len(all_pairs) == 5
+    assert [bucket_id for bucket_id, _ in bucket.uploads] == ["ns/out"] * 3
+    written = bucket.uploaded_keys("ns/out")
+    assert written[0] == "pages/p0.bin.md"
+    assert bucket.get("ns/out", "pages/p0.bin.md") == b"XXXX"
+    assert len(written) == 5
 
 
-def test_compute_resumes_by_output_existence(fake_hub, tmp_path):
-    fake_hub["listings"]["ns/src"] = [bf(f"pages/p{i}.bin", size=4) for i in range(5)]
+def test_compute_resumes_by_output_existence(bucket: FakeBucket, tmp_path):
+    bucket.seed("ns/src", [f"pages/p{i}.bin" for i in range(5)], data=b"xxxx")
     # outputs for p0 and p3 already exist (keys prefixed by the source key)
-    fake_hub["listings"]["ns/out"] = [bf("pages/p0.bin.md"), bf("pages/p3.bin.md")]
+    bucket.seed("ns/out", ["pages/p0.bin.md", "pages/p3.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
@@ -77,14 +55,14 @@ def test_compute_resumes_by_output_existence(fake_hub, tmp_path):
         .compute(prefetch=0, dir=tmp_path)
     )
     assert (stats.processed, stats.skipped) == (3, 2)
-    done_keys = {k for _, pairs in fake_hub["writes"] for _, k in pairs}
+    done_keys = set(bucket.uploaded_keys("ns/out"))
     assert done_keys == {"pages/p1.bin.md", "pages/p2.bin.md", "pages/p4.bin.md"}
 
 
-def test_resume_prefix_match_is_not_a_substring_match(fake_hub, tmp_path):
+def test_resume_prefix_match_is_not_a_substring_match(bucket: FakeBucket, tmp_path):
     # p1.bin.md must NOT mark p1.bin2 done; p10.bin outputs must not mark p1.bin done.
-    fake_hub["listings"]["ns/src"] = [bf("p1.bin", size=4), bf("p10.bin", size=4)]
-    fake_hub["listings"]["ns/out"] = [bf("p10.bin.md")]
+    bucket.seed("ns/src", ["p1.bin", "p10.bin"], data=b"xxxx")
+    bucket.seed("ns/out", ["p10.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
@@ -94,27 +72,30 @@ def test_resume_prefix_match_is_not_a_substring_match(fake_hub, tmp_path):
     assert (stats.processed, stats.skipped) == (1, 1)
 
 
-def test_resume_with_embedded_out_prefix(fake_hub, tmp_path):
+def test_resume_with_embedded_out_prefix(bucket: FakeBucket, tmp_path):
     # to_bucket("ns/out/run1"): put_files writes "run1/<key>.md", and listings return FULL
     # bucket paths — resume must strip the embedded prefix before matching source keys.
     # (Regression: first real smoke run reprocessed everything because it didn't.)
-    fake_hub["listings"]["ns/src"] = [bf(f"pages/p{i}.bin", size=4) for i in range(3)]
-    fake_hub["listings"]["ns/out"] = [bf("run1/pages/p0.bin.md"), bf("other/pages/p1.bin.md")]
+    bucket.seed("ns/src", [f"pages/p{i}.bin" for i in range(3)], data=b"xxxx")
+    # Outputs of other runs that the Hub's string-prefix listing for "run1" also returns.
+    # "run1-pages/p1.bin.md" is adversarial: cutting len("run1/") characters off it leaves
+    # "pages/p1.bin.md", so only bucketbag's own "run1/" filter keeps it from marking p1 done.
+    bucket.seed("ns/out", ["run1/pages/p0.bin.md", "run10/pages/p1.bin.md", "run1-pages/p1.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
         .to_bucket("ns/out/run1")
         .compute(prefetch=0, dir=tmp_path)
     )
-    # p0 done under run1/; p1's output lives under a DIFFERENT prefix -> not done
+    # p0 done under run1/; p1's outputs live under sibling runs -> not done
     assert (stats.processed, stats.skipped) == (2, 1)
-    written = {k for _, pairs in fake_hub["writes"] for _, k in pairs}
+    written = set(bucket.uploaded_keys("ns/out"))
     assert written == {"run1/pages/p1.bin.md", "run1/pages/p2.bin.md"}
 
 
-def test_compute_resume_false_reprocesses(fake_hub, tmp_path):
-    fake_hub["listings"]["ns/src"] = [bf("a.bin", size=4)]
-    fake_hub["listings"]["ns/out"] = [bf("a.bin.md")]
+def test_compute_resume_false_reprocesses(bucket: FakeBucket, tmp_path):
+    bucket.seed("ns/src", ["a.bin"], data=b"xxxx")
+    bucket.seed("ns/out", ["a.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md)
@@ -124,8 +105,8 @@ def test_compute_resume_false_reprocesses(fake_hub, tmp_path):
     assert (stats.processed, stats.skipped) == (1, 0)
 
 
-def test_setup_runs_once_and_ctx_is_passed(fake_hub, tmp_path):
-    fake_hub["listings"]["ns/src"] = [bf(f"f{i}.bin", size=2) for i in range(4)]
+def test_setup_runs_once_and_ctx_is_passed(bucket: FakeBucket, tmp_path):
+    bucket.seed("ns/src", [f"f{i}.bin" for i in range(4)], data=b"xx")
     setup_calls = []
 
     def load_model():
@@ -146,8 +127,8 @@ def test_setup_runs_once_and_ctx_is_passed(fake_hub, tmp_path):
     assert setup_calls == [1]  # once per compute, not per batch
 
 
-def test_take_returns_outputs_and_writes_nothing(fake_hub, tmp_path):
-    fake_hub["listings"]["ns/src"] = [bf(f"f{i}.bin", size=2) for i in range(10)]
+def test_take_returns_outputs_and_writes_nothing(bucket: FakeBucket, tmp_path):
+    bucket.seed("ns/src", [f"f{i}.bin" for i in range(10)], data=b"xx")
     out = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=5)
@@ -155,10 +136,10 @@ def test_take_returns_outputs_and_writes_nothing(fake_hub, tmp_path):
         .take(3, dir=tmp_path)
     )
     assert [k for k, _ in out] == ["f0.bin.md", "f1.bin.md", "f2.bin.md"]
-    assert fake_hub["writes"] == []
+    assert bucket.calls["upload"] == 0
 
 
-def test_compute_requires_fn_and_out(fake_hub):
+def test_compute_requires_fn_and_out(bucket: FakeBucket):
     with pytest.raises(ValueError, match="map_batches"):
         Bag.from_bucket("ns/src").compute()
     with pytest.raises(ValueError, match="to_bucket"):

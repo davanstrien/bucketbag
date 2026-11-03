@@ -32,7 +32,7 @@ import re
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -398,7 +398,7 @@ def batched_files(
     start_after: str | None = None,
     limit: int | None = None,
     token: str | bool | None = None,
-) -> Iterator[list[LoadedItem]]:
+) -> Generator[list[LoadedItem], None, None]:
     """``partition_all`` for bucket files: download each batch, yield it, delete it.
 
     Lists the bucket (or uses ``keys=``), then downloads files in batches to ``dir`` (default
