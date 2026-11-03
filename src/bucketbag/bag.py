@@ -38,7 +38,7 @@ from huggingface_hub import BucketFile
 
 from . import (
     LoadedItem,
-    _check_batch_bounds,
+    _check_batch_settings,
     _list_bucketfiles,
     _parse_bucket,
     batched_files,
@@ -86,11 +86,29 @@ def _with_context(
 
 
 def _unmatched_output(pairs: list[Output], items: list[LoadedItem]) -> str | None:
-    """The first output key that starts with no input key of its batch, else ``None``."""
+    """The first output key that starts with no input key of its batch, else ``None``.
+
+    Looks up each prefix of the output key in a set, so a large batch stays cheap.
+    """
+    inputs = {item.key for item in items}
     for key, _ in pairs:
-        if not any(key.startswith(item.key) for item in items):
+        if not any(key[:end] in inputs for end in range(len(key), 0, -1)):
             return key
     return None
+
+
+def _warn_if_unmatched(pairs: list[Output], items: list[LoadedItem]) -> bool:
+    """Log a warning if an output key cannot mark its input done; return whether it did."""
+    orphan = _unmatched_output(pairs, items)
+    if orphan is None:
+        return False
+    logger.warning(
+        "Output key %r does not start with an input key of its batch, so resume cannot mark "
+        "that input done and it runs again on every re-run. Name each output "
+        "<input key><suffix>, e.g. 'pages/p1.jp2.md'.",
+        orphan,
+    )
+    return True
 
 
 @dataclass(frozen=True)
@@ -157,7 +175,7 @@ class Bag:
         ``batch_size``/``max_bytes`` bound each batch by file count/total bytes; at least one
         must be set, and each must be at least 1.
         """
-        _check_batch_bounds(batch_size, max_bytes)
+        _check_batch_settings(batch_size, max_bytes)
         return replace(self, fn=fn, setup=setup, batch_size=batch_size, max_bytes=max_bytes)
 
     def to_bucket(self, out: str) -> Bag:
@@ -205,6 +223,7 @@ class Bag:
         files = self._list_inputs(limit=n)
         apply = _with_context(fn, self.setup)
         outputs: list[Output] = []
+        warned = False
         for batch in batched_files(
             self.src,
             keys=files,
@@ -214,7 +233,9 @@ class Bag:
             dir=dir,
             token=self.token,
         ):
-            outputs.extend(apply(batch))
+            pairs = list(apply(batch))
+            warned = warned or _warn_if_unmatched(pairs, batch)
+            outputs.extend(pairs)
         return outputs
 
     def compute(
@@ -234,6 +255,7 @@ class Bag:
             raise ValueError("compute() needs a map_batches(fn) stage")
         if self.out is None:
             raise ValueError("compute() needs a to_bucket(out) stage")
+        _check_batch_settings(self.batch_size, self.max_bytes, prefetch)
 
         todo, skipped = self._list_todo(resume=resume)
         if skipped:
@@ -252,15 +274,7 @@ class Bag:
             token=self.token,
         ):
             pairs = list(apply(batch))
-            orphan = None if warned else _unmatched_output(pairs, batch)
-            if orphan is not None:
-                logger.warning(
-                    "Output key %r does not start with an input key of its batch, so resume "
-                    "cannot mark that input done and it runs again on every re-run. Name each "
-                    "output <input key><suffix>, e.g. 'pages/p1.jp2.md'.",
-                    orphan,
-                )
-                warned = True
+            warned = warned or _warn_if_unmatched(pairs, batch)
             put_files(pairs, self.out, token=self.token)
             processed += len(batch)
             batches += 1

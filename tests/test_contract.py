@@ -132,8 +132,9 @@ def test_output_under_a_run_prefix_marks_its_input_done(bucket: FakeBucket, tmp_
     assert run.compute(prefetch=0, dir=tmp_path).processed == 0
 
 
+@pytest.mark.parametrize("entry", ["take", "compute"])
 def test_output_key_without_the_input_key_is_reported_once(
-    bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture, entry: str
 ) -> None:
     def replace_extension(items: list[LoadedItem]) -> list[Output]:
         return [(it.key.removesuffix(".jp2") + ".md", b"text") for it in items]
@@ -141,7 +142,10 @@ def test_output_key_without_the_input_key_is_reported_once(
     bucket.seed(SRC, PAGES[:4])
     run = Bag.from_bucket(SRC).map_batches(replace_extension, batch_size=2).to_bucket(OUT)
     with caplog.at_level(logging.WARNING, logger="bucketbag"):
-        run.compute(prefetch=0, dir=tmp_path)
+        if entry == "take":
+            run.take(4, dir=tmp_path)
+        else:
+            run.compute(prefetch=0, dir=tmp_path)
     warnings = [record for record in caplog.records if "resume" in record.getMessage()]
     assert len(warnings) == 1  # two batches, one warning
     assert "pages/p0.md" in warnings[0].getMessage()
@@ -251,9 +255,13 @@ def test_bag_bounds_each_batch_by_bytes(bucket: FakeBucket, tmp_path: Path) -> N
         return upper_md(items)
 
     run = Bag.from_bucket(SRC).map_batches(record, batch_size=None, max_bytes=6).to_bucket(OUT)
-    run.compute(prefetch=0, dir=tmp_path)
     # 3+3 fits in 6 bytes; the 9-byte file is larger than the bound, so it is a batch alone.
-    assert seen == [["p0.jp2", "p1.jp2"], ["p2.jp2"], ["p3.jp2"], ["p4.jp2"]]
+    expected = [["p0.jp2", "p1.jp2"], ["p2.jp2"], ["p3.jp2"], ["p4.jp2"]]
+    run.take(5, dir=tmp_path)
+    assert seen == expected
+    seen.clear()
+    run.compute(prefetch=0, dir=tmp_path)
+    assert seen == expected
 
 
 def test_token_reaches_every_hub_call(bucket: FakeBucket, tmp_path: Path) -> None:
@@ -280,9 +288,13 @@ def test_unworkable_batch_bounds_are_refused_before_listing(
     assert bucket.calls["list"] == 0
 
 
-def test_negative_prefetch_is_refused(bucket: FakeBucket, tmp_path: Path) -> None:
+def test_negative_prefetch_is_refused_before_listing(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES)
     with pytest.raises(ValueError, match="prefetch"):
         next(batched_files(SRC, prefetch=-1, dir=tmp_path))
+    with pytest.raises(ValueError, match="prefetch"):
+        bag().compute(prefetch=-1, dir=tmp_path)
+    assert bucket.calls["list"] == 0
 
 
 def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Path) -> None:

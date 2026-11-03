@@ -38,7 +38,8 @@ when the loop ends. A caller that keeps the generator in a variable must call `.
   (`pages/p1.jp2` → `pages/p1.jp2.md`). `compute()` processes only inputs that are not done;
   `compute(resume=False)` processes all of them.
 - An output key that does not start with an input key of its batch is logged as a warning,
-  once per `compute()`. Resume cannot match it, so that input runs again on every re-run.
+  once per `compute()` or `take()`. Resume cannot match it, so that input runs again on every
+  re-run.
 - `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs once per
   `compute()` or `take()`.
 

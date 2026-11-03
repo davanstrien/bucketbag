@@ -360,8 +360,8 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
-def _check_batch_bounds(n: int | None, max_bytes: int | None) -> None:
-    """Refuse batch bounds that cannot work, before anything is listed or downloaded."""
+def _check_batch_settings(n: int | None, max_bytes: int | None, prefetch: int = 0) -> None:
+    """Refuse batch settings that cannot work, before anything is listed or downloaded."""
     if n is None and max_bytes is None:
         raise ValueError(
             "Batches need a bound: set the file count (n / batch_size), max_bytes, or both. "
@@ -371,6 +371,8 @@ def _check_batch_bounds(n: int | None, max_bytes: int | None) -> None:
         raise ValueError(f"The file count per batch must be at least 1, got {n}.")
     if max_bytes is not None and max_bytes < 1:
         raise ValueError(f"max_bytes must be at least 1, got {max_bytes}.")
+    if prefetch < 0:
+        raise ValueError(f"prefetch must be 0 or more, got {prefetch}.")
 
 
 def _pack(
@@ -457,9 +459,7 @@ def batched_files(
     Yields:
         ``list[LoadedItem]`` for each batch (already on local disk).
     """
-    _check_batch_bounds(n, max_bytes)
-    if prefetch < 0:
-        raise ValueError(f"prefetch must be 0 or more, got {prefetch}.")
+    _check_batch_settings(n, max_bytes, prefetch)
     bucket_id, embedded_prefix = _parse_bucket(bucket)
     if keys is not None:
         remotes: list[BucketFile | str] = list(keys)
@@ -598,11 +598,12 @@ def completed_keys(
             continue  # Never treat sibling-run shards as completed work.
         full = f"{_BUCKET_PREFIX}{bucket_id}/{item.path}"
         # pyarrow raises the same error type for a missing column and a corrupt shard, so the
-        # schema is read first: only an unreadable shard is skipped.
+        # schema is checked first: only an unreadable shard is skipped.
         try:
             with fs.open(full, "rb") as fh:
-                names = pq.read_schema(fh).names
-                table = pq.read_table(fh, columns=[column]) if column in names else None
+                shard = pq.ParquetFile(fh)
+                names = shard.schema_arrow.names
+                table = shard.read(columns=[column]) if column in names else None
         except Exception as exc:  # noqa: BLE001 - resume must tolerate a bad/partial shard
             logger.warning("completed_keys: could not read %s (%s)", item.path, exc)
             continue

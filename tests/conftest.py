@@ -84,19 +84,21 @@ def fake_parquet(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         def open(self, url: str, mode: str = "rb") -> Generator[Handle, None, None]:
             yield Handle(url.removeprefix("hf://buckets/").split("/", 2)[2])
 
-    def refuse_unreadable(fh: Handle) -> None:
-        if fh.key in state.unreadable:  # a corrupt shard fails every read, as in pyarrow
-            raise ValueError(f"{fh.key} is not a parquet file")
+    class ParquetFile:
+        def __init__(self, fh: Handle) -> None:
+            if fh.key in state.unreadable:  # a corrupt shard fails to open, as in pyarrow
+                raise ValueError(f"{fh.key} is not a parquet file")
+            self.key = fh.key
+            self.schema_arrow = SimpleNamespace(names=list(state.columns))
 
-    def read_schema(fh: Handle) -> SimpleNamespace:
-        refuse_unreadable(fh)
-        return SimpleNamespace(names=list(state.columns))
+        def read(self, columns: list[str]) -> SimpleNamespace:
+            missing = [name for name in columns if name not in state.columns]
+            if missing:  # pyarrow raises for a column the file does not have
+                raise ValueError(f"No match for FieldRef.Name({missing[0]})")
+            key = self.key
+            return SimpleNamespace(column=lambda name: SimpleNamespace(to_pylist=lambda: [key]))
 
-    def read_table(fh: Handle, columns: list[str] | None = None) -> SimpleNamespace:
-        refuse_unreadable(fh)
-        return SimpleNamespace(column=lambda name: SimpleNamespace(to_pylist=lambda: [fh.key]))
-
-    pq = SimpleNamespace(read_schema=read_schema, read_table=read_table)
+    pq = SimpleNamespace(ParquetFile=ParquetFile)
     # ``import pyarrow.parquet as pq`` binds via the parent's attribute, so both must agree.
     monkeypatch.setitem(sys.modules, "pyarrow", SimpleNamespace(parquet=pq))
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", pq)
