@@ -45,11 +45,16 @@ allowed-unresolved-imports = ["pyarrow.**"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+# A test stuck for 120 s dumps every thread's stack and ends the run. The thread method is
+# needed: with the signal method a stuck prefetch worker still blocks the process from exiting.
+timeout = 120
+timeout_method = "thread"
 
 [dependency-groups]
 dev = [
     "hypothesis>=6.155.7",
     "pytest>=9.1.1",
+    "pytest-timeout>=2.4",
     "ruff>=0.15",
     "ty>=0.0.91",
 ]

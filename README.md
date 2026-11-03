@@ -17,7 +17,7 @@ your control. Not faster than the raw API (same transport), and not a framework.
 
 ```toml
 # /// script
-# dependencies = ["bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.3.0"]
+# dependencies = ["bucketbag @ https://github.com/davanstrien/bucketbag/archive/refs/tags/v0.3.1.tar.gz"]
 # ///
 ```
 
