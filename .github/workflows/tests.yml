@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Backstop if a test hangs outside pytest-timeout's reach.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

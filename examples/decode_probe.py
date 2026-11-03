@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "bucketbag @ git+https://github.com/davanstrien/bucketbag@v0.3.1",
+#     "bucketbag @ https://github.com/davanstrien/bucketbag/archive/refs/tags/v0.3.1.tar.gz",
 #     "pillow",
 # ]
 # ///
