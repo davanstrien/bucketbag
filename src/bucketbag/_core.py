@@ -207,12 +207,3 @@ def _split_done(
     existing = set(out_keys)
     todo = [f for f in files if out.key_for(f.path + done) not in existing]
     return todo, len(files) - len(todo)
-
-
-def _first_not_done(input_keys: Iterable[str], output_keys: Iterable[str], done: str) -> str | None:
-    """The first input key with no ``key + done`` among its batch's outputs, else ``None``."""
-    written = set(output_keys)
-    for key in input_keys:
-        if key + done not in written:
-            return key
-    return None

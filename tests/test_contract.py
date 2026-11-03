@@ -7,6 +7,7 @@ that only ``KnownGap`` satisfies, so the fix has to remove the marker. None is o
 from __future__ import annotations
 
 import logging
+import signal
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -129,7 +130,32 @@ def test_at_most_prefetch_plus_one_batches_are_on_disk(
     peak = 0
     for _ in batched_files(SRC, keys=files, n=1, prefetch=prefetch, dir=tmp_path):
         peak = max(peak, settled_dir_count(tmp_path))
-    assert peak == prefetch + 1
+    assert peak <= prefetch + 1
+    if prefetch:
+        assert peak >= 2  # the lookahead does download ahead
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
+@pytest.mark.parametrize("prefetch", [0, 1, 2])
+def test_ctrl_c_while_waiting_leaves_no_files(
+    bucket: FakeBucket, tmp_path: Path, prefetch: int
+) -> None:
+    files = bucket.seed(SRC, PAGES)
+    bucket.download_seconds = 0.3
+    batches = batched_files(SRC, keys=files, n=1, prefetch=prefetch, dir=tmp_path)
+
+    def interrupt(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 0.05)  # fires while next() waits for the download
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            next(batches)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert count_bb_dirs(tmp_path) == 0
 
 
 def test_a_kept_generator_deletes_its_files_on_close(bucket: FakeBucket, tmp_path: Path) -> None:
@@ -184,7 +210,7 @@ def test_output_under_a_run_prefix_marks_its_input_done(bucket: FakeBucket, tmp_
 
 
 @pytest.mark.parametrize("entry", ["take", "compute"])
-def test_output_key_without_the_input_key_is_reported_once(
+def test_an_input_without_its_done_output_is_reported_once(
     bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture, entry: str
 ) -> None:
     def replace_extension(items: list[LoadedItem]) -> list[Output]:

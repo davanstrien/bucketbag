@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -259,21 +259,6 @@ def _download_batch(
     return _Batch(tmpdir, present)
 
 
-def _top_up(
-    ahead: deque[Future[_Batch]],
-    chunks: Iterator[list[BucketFile | str]],
-    pool: ThreadPoolExecutor,
-    fetch: Callable[[list[BucketFile | str]], _Batch],
-    want: int,
-) -> None:
-    """Submit downloads until ``want`` batches are queued or the chunks run out."""
-    while len(ahead) < want:
-        chunk = next(chunks, None)
-        if chunk is None:
-            return
-        ahead.append(pool.submit(fetch, chunk))
-
-
 def _drain(ahead: deque[Future[_Batch]]) -> None:
     """Delete every queued batch: cancel downloads not started, wait for the rest."""
     for future in ahead:
@@ -334,7 +319,7 @@ def batched_files(
             this forms its own batch.
         dir: download directory (RAM tmpfs by default).
         prefetch: how many batches download ahead of the one you are processing (``0`` =
-            sequential). It is also the number of download threads.
+            sequential). It is also the number of download threads (at least one).
         token: HF token (defaults to the logged-in token).
 
     Yields:
@@ -374,15 +359,27 @@ def batched_files(
 
     with ThreadPoolExecutor(max_workers=max(1, prefetch), thread_name_prefix="bb-dl") as pool:
         ahead: deque[Future[_Batch]] = deque()
+
+        def top_up() -> None:
+            """Queue downloads until prefetch + 1 batches are on their way or none are left."""
+            while len(ahead) < prefetch + 1:
+                chunk = next(chunks, None)
+                if chunk is None:
+                    return
+                ahead.append(pool.submit(fetch, chunk))
+
         try:
-            _top_up(ahead, chunks, pool, fetch, want=prefetch + 1)
+            top_up()
             while ahead:
-                batch = ahead.popleft().result()  # from here this generator owns batch.tmpdir
+                # Wait before popping: a Ctrl-C during the wait leaves the future queued, so
+                # _drain still deletes its files.
+                batch = ahead[0].result()
+                ahead.popleft()  # from here this generator owns batch.tmpdir
                 try:
                     yield batch.items
                 finally:
                     shutil.rmtree(batch.tmpdir, ignore_errors=True)
-                _top_up(ahead, chunks, pool, fetch, want=prefetch + 1)
+                top_up()
         finally:
             _drain(ahead)
 

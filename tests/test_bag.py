@@ -46,7 +46,7 @@ def test_compute_end_to_end(bucket: FakeBucket, tmp_path):
 
 def test_compute_resumes_by_output_existence(bucket: FakeBucket, tmp_path):
     bucket.seed("ns/src", [f"pages/p{i}.bin" for i in range(5)], data=b"xxxx")
-    # outputs for p0 and p3 already exist (keys prefixed by the source key)
+    # outputs for p0 and p3 already exist (source key + the done suffix)
     bucket.seed("ns/out", ["pages/p0.bin.md", "pages/p3.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
@@ -59,8 +59,8 @@ def test_compute_resumes_by_output_existence(bucket: FakeBucket, tmp_path):
     assert done_keys == {"pages/p1.bin.md", "pages/p2.bin.md", "pages/p4.bin.md"}
 
 
-def test_resume_prefix_match_is_not_a_substring_match(bucket: FakeBucket, tmp_path):
-    # p1.bin.md must NOT mark p1.bin2 done; p10.bin outputs must not mark p1.bin done.
+def test_resume_matches_the_exact_done_output(bucket: FakeBucket, tmp_path):
+    # Only p1.bin + ".md" marks p1.bin done; p10.bin's output does not.
     bucket.seed("ns/src", ["p1.bin", "p10.bin"], data=b"xxxx")
     bucket.seed("ns/out", ["p10.bin.md"])
     stats = (

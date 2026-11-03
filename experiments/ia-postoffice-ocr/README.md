@@ -55,6 +55,10 @@ The whole I/O side of the script is:
 
 Resume = re-run the same command; pages with outputs are skipped.
 
+> **bucketbag 0.4:** this experiment pins v0.2.0, so it runs as recorded. On 0.4.0 the
+> plan needs `.to_bucket(f"{src}/surya", done=".md")` (each page writes `<key>.md`), and its
+> `override-dependencies` floor rises to `huggingface-hub>=1.21`.
+
 ## Results (2026-07-03)
 
 | run | flavor | pages | pages/min | inference share of wall | $/1k pages |
@@ -94,5 +98,5 @@ Gotchas hit (each one commit):
 - Bucket listing prefixes are **string** prefixes: `prefix="surya"` also matches `surya-mount/...`.
   Use a trailing-slash-aware filter when prefixes can collide.
 - Key conventions differ: the recipe *replaces* the extension (`X.md`), bucketbag examples
-  *append* (`X.jp2.md` — which the Bag resume contract needs, since done-ness is
-  output-key-starts-with-source-key).
+  *append* (`X.jp2.md` — which the Bag resume contract needs: v0.2 counted an input done
+  when an output key started with its key; 0.4 needs the exact `<key><done>` output).

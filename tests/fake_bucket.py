@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+import time
 import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
@@ -49,6 +50,8 @@ class FakeBucket:
         partial_upload_on: that upload call stores the first half of its files, then raises
             ``FaultInjected``. The server applies the files of a batch that succeed and reports
             the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
+        download_seconds: each download call sleeps this long after writing its files, so a
+            test can interrupt the consumer while it waits.
         missing: keys that a listing returns but that are gone by download time. As in the
             hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
             existence check (it downloads by content hash), so what the real hub does then is
@@ -70,6 +73,7 @@ class FakeBucket:
     fail_download_on: set[int] = field(default_factory=set)
     fail_upload_on: set[int] = field(default_factory=set)
     partial_upload_on: set[int] = field(default_factory=set)
+    download_seconds: float = 0.0
     calls: Counter[str] = field(default_factory=Counter)
     list_prefixes: list[str | None] = field(default_factory=list)
     uploads: list[tuple[str, list[str]]] = field(default_factory=list)
@@ -151,6 +155,8 @@ class FakeBucket:
                 )
                 continue
             Path(local).write_bytes(data[key])
+        if self.download_seconds:
+            time.sleep(self.download_seconds)
 
     def batch_bucket_files(
         self,

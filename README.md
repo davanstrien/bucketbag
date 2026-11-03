@@ -72,7 +72,7 @@ bag.compute()      # list -> skip done -> download -> fn -> put_files; kill + re
 Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
 (`pages/p10.md` never marks `pages/p1` done). `compute()`
 runs in-process today; fanning the same plan across HF Jobs (one shard per job) is the next layer.
-[CONTRACT.md](CONTRACT.md) states what bucketbag promises, and marks the rules it still breaks.
+[CONTRACT.md](CONTRACT.md) states what bucketbag promises; the tests check each rule.
 
 ## API
 

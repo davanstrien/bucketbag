@@ -30,7 +30,7 @@ from typing import Any, TypeVar, overload
 
 from huggingface_hub import BucketFile
 
-from ._core import BucketRef, _check_batch_settings, _first_not_done, _split_done
+from ._core import BucketRef, _check_batch_settings, _split_done
 from ._hub import LoadedItem, _list_bucketfiles, batched_files, logger, put_files
 
 __all__ = ["Bag", "BagStats"]
@@ -73,7 +73,8 @@ def _with_context(
 
 def _warn_if_not_done(batch: list[LoadedItem], pairs: list[Output], done: str) -> bool:
     """Log a warning if an input got no ``key + done`` output; return whether it did."""
-    key = _first_not_done([item.key for item in batch], [k for k, _ in pairs], done)
+    written = {k for k, _ in pairs}
+    key = next((item.key for item in batch if item.key + done not in written), None)
     if key is None:
         return False
     logger.warning(
