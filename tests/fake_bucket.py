@@ -46,10 +46,12 @@ class FakeBucket:
         fail_download_on / fail_upload_on: 1-based call numbers, counted per method. That call
             raises ``FaultInjected`` before it reads or writes anything.
         partial_upload_on: that upload call stores the first half of its files, then raises
-            ``FaultInjected``. huggingface_hub 2.x does this: it sends a large batch in chunks,
-            applies every chunk that succeeds, then raises ``BucketBatchError``.
-        missing: keys that a listing returns but that are gone by download time. Downloads skip
-            them with a warning, as the Hub does for string keys.
+            ``FaultInjected``. The server applies the files of a batch that succeed and reports
+            the rest; huggingface_hub 2.x raises ``BucketBatchError`` on that report.
+        missing: keys that a listing returns but that are gone by download time. As in the
+            hub, a string key is skipped with a warning. A ``BucketFile`` skips the hub's
+            existence check (it downloads by content hash), so what the real hub does then is
+            unverified; the fake raises ``FileNotFoundError``.
         overmatch_after_first_page: replay the Hub pagination bug fixed in September 2026.
             After a full first page the trailing slash was lost, so siblings leaked in.
         listing_order: ``"reversed"`` returns keys in reverse order. The Hub does not document
@@ -70,6 +72,7 @@ class FakeBucket:
     calls: Counter[str] = field(default_factory=Counter)
     list_prefixes: list[str | None] = field(default_factory=list)
     uploads: list[tuple[str, list[str]]] = field(default_factory=list)
+    tokens: list[tuple[str, object]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def _count(self, method: str) -> int:
@@ -140,7 +143,7 @@ class FakeBucket:
         for remote, local in files:
             key = remote.path if isinstance(remote, BucketFile) else remote
             if key in self.missing or key not in data:
-                if raise_on_missing_files:
+                if raise_on_missing_files or isinstance(remote, BucketFile):
                     raise FileNotFoundError(key)
                 warnings.warn(
                     f"File '{key}' not found in bucket '{bucket_id}'. Skipping.", stacklevel=2
@@ -183,7 +186,9 @@ class FakeBucket:
         fake = getattr(self, name)
 
         def call(api: HfApi, *args: Any, **kwargs: Any) -> Any:
-            real.bind(api, *args, **kwargs)  # TypeError if the real method would reject the call
+            bound = real.bind(api, *args, **kwargs)  # TypeError if the real method would reject it
+            # The token the call would send: its own token= argument, else the HfApi's.
+            self.tokens.append((name, bound.arguments.get("token") or api.token))
             return fake(*args, **kwargs)
 
         return call

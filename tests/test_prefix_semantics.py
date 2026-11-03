@@ -1,11 +1,11 @@
 """Regression tests for prefix directory semantics under over-matching listings.
 
-The Hub previously lost a trailing slash after the first page of a recursive listing.
-The server bug is fixed, but the tests keep replaying it: ``FakeBucket`` with
-``overmatch_after_first_page=True`` and a two-key page returns the same listing as
-``hub_like_listing`` below. bucketbag must keep results within the caller's original prefix
-even if an upstream listing over-matches again, so the directory assertions fail if the
-client-side guards are removed.
+Until September 2026 the Hub lost a trailing slash after the first page of a recursive
+listing (first seen on 2026-08-26 with ``biglam/britannica``, prefix
+``source/pages/encyclopdiabri01chis/``). The server bug is fixed, but these tests keep
+replaying it: ``FakeBucket`` with ``overmatch_after_first_page=True`` and a two-key page.
+bucketbag must keep results within the caller's prefix even if a listing over-matches again,
+so the directory assertions fail if the client-side guards are removed.
 """
 
 from __future__ import annotations
@@ -25,26 +25,8 @@ TREE = ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y", "a/c/z"]
 A_B = ["a/b/x1", "a/b/x2", "a/b/x3"]
 
 
-def hub_like_listing(keys: list[str], prefix: str | None, page: int = PAGE) -> list[str]:
-    """Reproduce the historical paginated over-match observed on 2026-08-26.
-
-    Original repro: ``biglam/britannica``, prefix ``source/pages/encyclopdiabri01chis/``.
-
-    Page 1 honors the trailing slash. Later pages simulate a next-link redirect losing
-    it, so the listing spills into sibling directories. Retained as an adversarial
-    regression case, independently of the current server implementation.
-    """
-    keys = sorted(keys)
-    first = [k for k in keys if k.startswith(prefix or "")][:page]
-    if len(first) < page:
-        return first
-    head = (prefix or "").rstrip("/")
-    rest = [k for k in keys if k.startswith(head) and k > first[-1]]
-    return first + rest
-
-
 def overmatching_bucket(bucket: FakeBucket, keys: list[str]) -> None:
-    """Store ``keys`` (5 bytes each) in ``ns/b`` and list them like ``hub_like_listing``.
+    """Store ``keys`` (5 bytes each) in ``ns/b`` behind the old over-matching listing.
 
     ``bucket.list_prefixes`` then records the ``prefix`` values the server was called with, so
     tests can also check the prefix reaches the server verbatim (slash preserved) and the call
@@ -58,10 +40,16 @@ def overmatching_bucket(bucket: FakeBucket, keys: list[str]) -> None:
 # --- sanity: the fake reproduces the historical over-match past page 1 -------------------
 
 
-def test_fake_server_over_matches_after_first_page():
-    assert hub_like_listing(TREE, "a/b/") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
-    assert hub_like_listing(TREE, "a/b/", page=10) == A_B  # single page: slash honored
-    assert hub_like_listing(TREE, "a/b") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
+def listed(bucket: FakeBucket, prefix: str) -> list[str]:
+    return [f.path for f in bucket.list_bucket_tree("ns/b", prefix=prefix, recursive=True)]
+
+
+def test_fake_server_over_matches_after_first_page(bucket: FakeBucket):
+    overmatching_bucket(bucket, TREE)
+    assert listed(bucket, "a/b/") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
+    assert listed(bucket, "a/b") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
+    bucket.page_size = 10
+    assert listed(bucket, "a/b/") == A_B  # one page: the slash is honoured
 
 
 # --- iter_keys --------------------------------------------------------------------------

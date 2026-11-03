@@ -86,7 +86,7 @@ def test_any_failure_cleans_up_and_a_rerun_finishes_exactly_once(
             warnings.simplefilter("ignore")  # the store warns about missing files, as the Hub does
             try:
                 plan.compute(prefetch=prefetch, dir=scratch)
-            except (Boom, FaultInjected):
+            except (Boom, FaultInjected, FileNotFoundError):
                 pass
         assert count_bb_dirs(Path(scratch)) == 0
         done_after_first_run = len(bucket.keys(OUT))
@@ -101,5 +101,5 @@ def test_any_failure_cleans_up_and_a_rerun_finishes_exactly_once(
             n_files - done_after_first_run,
         )
         written = bucket.uploaded_keys(OUT)
-        assert sorted(written) == sorted(set(written)), "an output was written twice"
+        assert len(written) == len(set(written)), "an output was written twice"
         assert all(bucket.get(OUT, key + ".md") == b"PAGE" for key in keys)

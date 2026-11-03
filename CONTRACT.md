@@ -13,10 +13,13 @@ today's code breaks; its test is a strict xfail until the fix lands.
   directory (`a/b/` lists `a/b/x`, not `a/bc/y`); without the slash, siblings match too.
   The same rule holds for `prefix=` and for a prefix inside the bucket reference.
   **Gap:** a prefix inside the bucket reference loses its trailing slash.
+- Passing both a prefix inside the bucket reference and `prefix=` is not defined yet.
 - Globs (`include`, `exclude`) match the whole key from the bucket root. `*` stays inside one
   path segment and `**` crosses `/`, as in `HfFileSystem.glob`. (`hf buckets sync --include`
   uses `fnmatch`, where `*` also crosses `/`.)
-- Listings return full keys from the bucket root, sorted.
+- Listings return full keys from the bucket root, sorted, files only. `start_after` skips
+  keys up to and including it. `limit` keeps the first `limit` keys in the Hub's listing
+  order, which is lexical today but not documented (issue #9).
 - `put_files(pairs, "ns/bucket/prefix")` writes each key under that prefix.
 
 ## 2. Temporary files
@@ -28,9 +31,12 @@ the loop body raises, when the caller stops early, and for batches downloaded ah
 ## 3. Resume (`Bag`)
 
 - An input is done when an output key under the `to_bucket` prefix starts with the input's key
-  (`pages/p1.jp2` → `pages/p1.jp2.md`). `compute()` processes only inputs that are not done.
+  (`pages/p1.jp2` → `pages/p1.jp2.md`). `compute()` processes only inputs that are not done;
+  `compute(resume=False)` processes all of them.
 - **Gap:** an output key that does not start with its input key is not reported. That input
   runs again on every re-run.
+- `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs once per
+  `compute()` or `take()`.
 
 ## 4. Failures (`Bag.compute`)
 
@@ -39,20 +45,23 @@ the loop body raises, when the caller stops early, and for batches downloaded ah
 | The map function raises | `compute()` raises that error. Earlier batches' outputs stay. |
 | A download fails | `compute()` raises that error. Earlier batches' outputs stay. |
 | An upload fails | `compute()` raises that error. Outputs that landed before it count as done.* |
-| A listed file is gone at download time | The input is skipped with a warning and stays not done. |
 
 In every row the temporary files are deleted, and a re-run processes exactly the inputs that
 have no output. Hypothesis checks this over random mixes of failures (`tests/test_fault_fuzz.py`).
 
-\* huggingface_hub 2.x sends a large upload in chunks, applies every chunk that succeeds, then
-raises `BucketBatchError`, so part of a batch can land. On hub 1.x a partial failure returned
-normally: `compute()` went on, and the missing outputs were redone on the next run.
+\* The server applies the files of an upload that succeed and reports the rest.
+huggingface_hub 2.x raises `BucketBatchError` on that report. 1.x checked only the HTTP status,
+so `compute()` went on, and the missing outputs were redone on the next run.
 
-**Gap:** `BagStats` does not count skipped missing files, so `listed = processed + skipped +
-missing` cannot be checked.
+A file that is listed but gone by download time: with string keys
+(`batched_files(keys=[...])`) the hub skips it with a warning, and bucketbag leaves it out of
+the batch. `Bag` passes `BucketFile` objects, which the hub downloads by content hash without
+an existence check; what happens then is not verified.
 
 ## 5. Arguments
 
+- `token=` reaches every hub call.
+- `max_bytes` with string keys raises `ValueError`: string keys carry no size.
 - **Gap:** settings that cannot work are not refused. `n=None` with `max_bytes=None` makes one
   batch of every file, and `n=0` yields an empty batch first.
 - The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given.

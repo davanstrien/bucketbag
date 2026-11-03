@@ -14,6 +14,7 @@ import pytest
 from conftest import count_bb_dirs, gap, known_gap
 from fake_bucket import FakeBucket, FaultInjected
 
+import bucketbag
 from bucketbag import Bag, LoadedItem, batched_files, iter_keys, put_files
 
 SRC, OUT = "ns/src", "ns/out"
@@ -85,6 +86,18 @@ def test_put_files_writes_under_the_prefix_in_the_reference(bucket: FakeBucket) 
     assert bucket.keys(OUT) == ["run1/k.md"]
 
 
+def test_start_after_and_limit_select_a_slice_of_the_sorted_keys(tree: FakeBucket) -> None:
+    assert list(iter_keys("ns/b", start_after="a/b/x.jp2", limit=2)) == ["a/b/y.jp2", "a/bc/z.jp2"]
+
+
+def test_folder_entries_are_skipped(tree: FakeBucket) -> None:
+    tree.folders = True
+    assert list(iter_keys("ns/b", prefix="a/")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
+
+
+# --- 2. Temporary files: tests/test_batched_files.py covers each prefetch level.
+
+
 # --- 3. Resume ----------------------------------------------------------------------------
 
 
@@ -140,9 +153,9 @@ def fail_on_batch(number: int) -> Callable[[list[LoadedItem]], list[Output]]:
     return fn
 
 
-def run_expecting(error: type[BaseException], run: Bag, tmp_path: Path) -> None:
+def run_expecting(error: type[BaseException], run: Bag, tmp_path: Path, prefetch: int = 2) -> None:
     with pytest.raises(error):
-        run.compute(prefetch=2, dir=tmp_path)
+        run.compute(prefetch=prefetch, dir=tmp_path)
     assert count_bb_dirs(tmp_path) == 0
 
 
@@ -168,11 +181,9 @@ def test_download_error_raises_and_keeps_earlier_outputs(
     bucket: FakeBucket, tmp_path: Path
 ) -> None:
     bucket.seed(SRC, PAGES)
-    bucket.fail_download_on.add(3)
-    run_expecting(FaultInjected, bag(), tmp_path)
+    bucket.fail_download_on.add(3)  # without prefetch, download call 3 is batch 3
+    run_expecting(FaultInjected, bag(), tmp_path, prefetch=0)
     bucket.fail_download_on.clear()
-    # Two prefetch threads: batch 3's download starts only after batch 1's or 2's has, so it is
-    # call #3, and batches 1 and 2 are written before compute() reaches it.
     assert len(out_keys(bucket)) == 4
     assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=4)
 
@@ -199,30 +210,32 @@ def test_partial_upload_raises_and_what_landed_counts_as_done(
     assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=3)
 
 
-def test_file_gone_at_download_is_skipped_and_stays_not_done(
-    bucket: FakeBucket, tmp_path: Path
+def test_string_key_gone_at_download_is_dropped_from_its_batch(
+    bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # The hub checks string keys and skips missing ones with a warning. A BucketFile (what Bag
+    # passes) skips that check and downloads by content hash, so this rule is for string keys.
     bucket.seed(SRC, PAGES)
     bucket.missing.add("pages/p3.jp2")
-    with pytest.warns(UserWarning, match="p3.jp2"):
-        bag().compute(prefetch=0, dir=tmp_path)
-    assert "pages/p3.jp2.md" not in out_keys(bucket)
-    bucket.missing.clear()
-    assert bag().compute(prefetch=0, dir=tmp_path).processed == 1
-
-
-@known_gap("BagStats does not count inputs skipped because their file was gone")
-def test_stats_account_for_every_listed_input(bucket: FakeBucket, tmp_path: Path) -> None:
-    bucket.seed(SRC, PAGES)
-    bucket.missing.add("pages/p3.jp2")
-    with pytest.warns(UserWarning):
-        stats = bag().compute(prefetch=0, dir=tmp_path)
-    missing = getattr(stats, "missing", None)
-    if missing is None or stats.processed + stats.skipped + missing != len(PAGES):
-        gap(f"{stats} does not add up to {len(PAGES)} listed inputs")
+    with pytest.warns(UserWarning, match="p3.jp2"), caplog.at_level(logging.WARNING, "bucketbag"):
+        batches = list(batched_files(SRC, keys=list(PAGES), n=10, prefetch=0, dir=tmp_path))
+    assert [[it.key for it in batch] for batch in batches] == [PAGES[:3] + PAGES[4:]]
+    assert any("missing" in record.getMessage() for record in caplog.records)
 
 
 # --- 5. Arguments -------------------------------------------------------------------------
+
+
+def test_token_reaches_every_hub_call(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES[:2])
+    run = Bag.from_bucket(SRC, token="hf_test").map_batches(upper_md).to_bucket(OUT)
+    run.compute(prefetch=0, dir=tmp_path)
+    assert {name for name, _ in bucket.tokens} == {
+        "list_bucket_tree",
+        "download_bucket_files",
+        "batch_bucket_files",
+    }
+    assert {token for _, token in bucket.tokens} == {"hf_test"}
 
 
 @known_gap("batched_files does not refuse batch settings that cannot work")
@@ -250,3 +263,24 @@ def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Pa
         Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
     except TypeError as error:
         gap(f"fn(items, *, suffix=...) failed: {error}")
+
+
+# --- Public names -------------------------------------------------------------------------
+
+
+def test_public_names() -> None:
+    # A module split must keep every name importable. Removing one is an API change: edit here.
+    assert sorted(bucketbag.__all__) == [
+        "Bag",
+        "BagStats",
+        "LoadedItem",
+        "batched_files",
+        "boost",
+        "completed_keys",
+        "iter_keys",
+        "partition_all",
+        "put_bytes",
+        "put_files",
+        "put_text",
+    ]
+    assert all(hasattr(bucketbag, name) for name in bucketbag.__all__)
