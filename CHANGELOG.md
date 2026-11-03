@@ -1,10 +1,64 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-03
 
-- Refresh prefix-listing documentation after the Hub pagination fix. Retain the client-side
-  prefix guards and adversarial regression tests as safeguards against over-matching listings;
-  runtime behaviour is unchanged.
+A rewrite of the internals around a written contract (CONTRACT.md), plus a run report for
+agents. First release on PyPI: `pip install bucketbag`.
+
+### Breaking changes and how to migrate
+
+- **`Bag` resume needs a done-suffix.** Write `to_bucket(out, done=".md")` when each input `k`
+  writes `k + ".md"`. An input is done only when that exact output exists, so `pages/p10.md`
+  no longer marks `pages/p1` done. `compute(resume=True)` without `done=` raises; pass
+  `resume=False` to process everything.
+- **The map function is called as `fn(items)`, or `fn(items, ctx)` with `setup=`.** bucketbag
+  no longer inspects its signature, so a two-parameter `fn` without `setup=` now gets one
+  argument (before, it got `None` as the second).
+- **`prefix=` joins below a prefix inside the bucket reference**, as a directory:
+  `iter_keys("ns/b/out", prefix="part-")` lists `out/part-*` (before, `prefix=` replaced it).
+  `prefix=""` adds nothing; before, it listed the whole bucket.
+- **A trailing `/` in the bucket reference is kept**: `"ns/b/a/b/"` lists the directory
+  `a/b` only (before, it also matched `a/bc/`).
+- **Globs follow fsspec's rules** (`HfFileSystem.glob`): `[...]` is a character class, `*` no
+  longer matches an empty path segment, and `**` inside a name (`**.jp2`) raises; write
+  `**/*.jp2`.
+- **Settings that cannot work raise before anything is listed**: neither `n`/`batch_size` nor
+  `max_bytes` set, a value below 1, a negative `prefetch`, a bool, nan or inf.
+- **`completed_keys` raises when a readable shard lacks `column=`** (before, every read error
+  became a warning, so a wrong column silently re-ran everything).
+- **`batched_files(max_workers=)` is removed**; `prefetch` sets the number of download threads.
+- **`LoadedItem` is frozen.** Assigning to `item.key` or `item.path` raises
+  `FrozenInstanceError`; build a new `LoadedItem(key=..., path=...)` instead.
+- **Dependency floors:** `huggingface-hub>=1.21`, `fsspec>=2023.12`, `hf-xet>=1.5.2`.
+
+### New
+
+- Hub web URLs work as bucket references (`https://huggingface.co/buckets/ns/b/tree/x/`).
+- A run report: `BagStats` splits the time into download wait, map and upload; `bound_by`
+  names the slowest stage and `hint` the setting to change. `compute()` logs its settings,
+  a progress line after batches (at most every 30 s) and the report. bucketbag's log lines
+  print to stderr as `[bucketbag] …` until your script configures logging.
+- A warning before the first download when the largest `prefetch + 1` batches would not fit in
+  the scratch dir (on `/dev/shm`, running out kills the process).
+- `Bag.compute()` and `take()` warn once when an input wrote no `k + done` output (it would
+  rerun forever).
+- `Bag.compute()` with nothing left to do returns without running `setup()` (no model load).
+- `py.typed`: the package is fully typed.
+
+### Fixed
+
+- `batched_files` kept `prefetch + 2` batches on disk; it now keeps at most `prefetch + 1`.
+- Temp files no longer leak when Ctrl-C arrives during a download wait, or when a queued
+  download stored a `BaseException`.
+- `Bag.take()` honours `max_bytes`.
+
+### Internal
+
+- A pure core (`_core`) inside a thin I/O shell (`_hub`); one owner per temp dir; one run loop
+  for `take()` and `compute()`.
+- CONTRACT.md states every rule; `tests/test_contract.py` checks each one against an in-memory
+  Hub that binds every call to the real `HfApi` signatures, plus Hypothesis fault fuzzing.
+- CI: ruff format, ty on src and tests, a complexity limit, and a 15-minute job timeout.
 
 ## 0.3.1 — 2026-08-26
 

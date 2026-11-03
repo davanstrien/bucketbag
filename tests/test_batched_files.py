@@ -12,12 +12,15 @@ batches leaked when the loop stopped early.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from pathlib import Path
+
 import pytest
 from conftest import count_bb_dirs
 from fake_bucket import FakeBucket, FaultInjected
 from huggingface_hub import BucketFile
 
-from bucketbag import batched_files, iter_keys
+from bucketbag import LoadedItem, batched_files, iter_keys
 
 BUCKET = "ns/bucket"
 
@@ -32,7 +35,7 @@ def seed_files(bucket: FakeBucket, n: int, size: int) -> list[BucketFile]:
 # Normal completion: every prefetch level must leave zero temp dirs.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("prefetch", [0, 1, 2])
-def test_cleans_up_on_normal_completion(bucket: FakeBucket, tmp_path, prefetch):
+def test_cleans_up_on_normal_completion(bucket: FakeBucket, tmp_path: Path, prefetch: int) -> None:
     keys = seed_files(bucket, 9, size=4)
     for batch in batched_files(BUCKET, keys=keys, n=1, prefetch=prefetch, dir=tmp_path):
         assert len(batch) == 1
@@ -43,7 +46,7 @@ def test_cleans_up_on_normal_completion(bucket: FakeBucket, tmp_path, prefetch):
 # --------------------------------------------------------------------------- #
 # Consumer exception.
 # --------------------------------------------------------------------------- #
-def _raise_after(make_gen, at):
+def _raise_after(make_gen: Callable[[], Iterable[list[LoadedItem]]], at: int) -> None:
     """Consume the generator from ``make_gen()``, raising after the ``at``-th batch.
 
     The generator is the loop's only reference, so when the frame unwinds on the raise the
@@ -55,14 +58,14 @@ def _raise_after(make_gen, at):
             raise RuntimeError("boom")
 
 
-def test_cleans_up_on_consumer_exception_prefetch_0(bucket: FakeBucket, tmp_path):
+def test_cleans_up_on_consumer_exception_prefetch_0(bucket: FakeBucket, tmp_path: Path) -> None:
     keys = seed_files(bucket, 9, size=4)
     with pytest.raises(RuntimeError, match="boom"):
         _raise_after(lambda: batched_files(BUCKET, keys=keys, n=1, prefetch=0, dir=tmp_path), 1)
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_cleans_up_on_consumer_exception_prefetch_2(bucket: FakeBucket, tmp_path):
+def test_cleans_up_on_consumer_exception_prefetch_2(bucket: FakeBucket, tmp_path: Path) -> None:
     keys = seed_files(bucket, 9, size=4)
     with pytest.raises(RuntimeError, match="boom"):
         _raise_after(lambda: batched_files(BUCKET, keys=keys, n=1, prefetch=2, dir=tmp_path), 1)
@@ -72,7 +75,7 @@ def test_cleans_up_on_consumer_exception_prefetch_2(bucket: FakeBucket, tmp_path
 # --------------------------------------------------------------------------- #
 # Download failure (one bad batch mid-loop).
 # --------------------------------------------------------------------------- #
-def test_cleans_up_on_download_failure_prefetch_0(bucket: FakeBucket, tmp_path):
+def test_cleans_up_on_download_failure_prefetch_0(bucket: FakeBucket, tmp_path: Path) -> None:
     # Batch #2 of 9 (n=1) fails. prefetch=0 -> the failing chunk cleans its own tmpdir and no
     # lookahead exists, so nothing leaks.
     bucket.fail_download_on.add(2)
@@ -83,7 +86,7 @@ def test_cleans_up_on_download_failure_prefetch_0(bucket: FakeBucket, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_cleans_up_on_download_failure_prefetch_2(bucket: FakeBucket, tmp_path):
+def test_cleans_up_on_download_failure_prefetch_2(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.fail_download_on.add(3)
     keys = seed_files(bucket, 9, size=4)
     with pytest.raises(FaultInjected):
@@ -95,7 +98,7 @@ def test_cleans_up_on_download_failure_prefetch_2(bucket: FakeBucket, tmp_path):
 # --------------------------------------------------------------------------- #
 # Batching / ordering / content.
 # --------------------------------------------------------------------------- #
-def test_yields_batches_in_key_order(bucket: FakeBucket, tmp_path):
+def test_yields_batches_in_key_order(bucket: FakeBucket, tmp_path: Path) -> None:
     keys = bucket.seed(BUCKET, [f"k{i}" for i in range(6)], data=b"x" * 3)
     seen = []
     # Read content *inside* the loop: a batch's tmpdir is deleted once the loop advances.
@@ -106,14 +109,14 @@ def test_yields_batches_in_key_order(bucket: FakeBucket, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_max_bytes_respected_with_bucketfile_keys(bucket: FakeBucket, tmp_path):
+def test_max_bytes_respected_with_bucketfile_keys(bucket: FakeBucket, tmp_path: Path) -> None:
     # sizes 10,10,10,10 with max_bytes=25 -> [0,1],[2,3]
     keys = bucket.seed(BUCKET, [f"k{i}" for i in range(4)], data=b"x" * 10)
     batches = list(batched_files(BUCKET, keys=keys, max_bytes=25, prefetch=0, dir=tmp_path))
     assert [[it.key for it in b] for b in batches] == [["k0", "k1"], ["k2", "k3"]]
 
 
-def test_empty_keys_yields_nothing(bucket: FakeBucket, tmp_path):
+def test_empty_keys_yields_nothing(bucket: FakeBucket, tmp_path: Path) -> None:
     assert list(batched_files(BUCKET, keys=[], n=5, dir=tmp_path)) == []
     assert count_bb_dirs(tmp_path) == 0
 
@@ -124,7 +127,7 @@ def test_empty_keys_yields_nothing(bucket: FakeBucket, tmp_path):
 # RAM-tmpfs scratch dir risks an OOMKill, not a disk-full, so a caller who asked for a
 # bound gets a ValueError instead of an unbounded loop.
 # --------------------------------------------------------------------------- #
-def test_string_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path):
+def test_string_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path: Path) -> None:
     keys = [f"k{i}" for i in range(4)]
     bucket.seed(BUCKET, keys)
     with pytest.raises(ValueError, match="max_bytes requires sized keys"):
@@ -132,7 +135,7 @@ def test_string_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_mixed_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path):
+def test_mixed_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path: Path) -> None:
     # A BucketFile at index 0 must not let a stray string sneak through: every key must be
     # sized when max_bytes is set (else _pack treats the unsized one as size 0).
     sized = bucket.put(BUCKET, "k0", data=b"x" * 10)
@@ -143,7 +146,7 @@ def test_mixed_keys_with_max_bytes_raises(bucket: FakeBucket, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_string_keys_without_max_bytes_ok(bucket: FakeBucket, tmp_path):
+def test_string_keys_without_max_bytes_ok(bucket: FakeBucket, tmp_path: Path) -> None:
     # Strings with a count cap only (no max_bytes) is a legitimate path and must still work.
     keys = [f"k{i}" for i in range(4)]
     bucket.seed(BUCKET, keys, data=b"x")
@@ -152,7 +155,7 @@ def test_string_keys_without_max_bytes_ok(bucket: FakeBucket, tmp_path):
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_resume_composition_honors_max_bytes(bucket: FakeBucket, tmp_path):
+def test_resume_composition_honors_max_bytes(bucket: FakeBucket, tmp_path: Path) -> None:
     # The README "Writing + resume" shape: iter_keys(objects=True) -> filter done -> batched_files.
     # Regression test for the issue itself: max_bytes must be honored end to end, not dropped.
     SRC, OUT = "ns/src", "ns/out"

@@ -522,6 +522,19 @@ def test_seconds_covers_listing_and_setup(bucket: FakeBucket, tmp_path: Path) ->
     assert stats.wait_s + stats.map_s + stats.upload_s < SLOW  # the split leaves both out
 
 
+def test_a_run_with_nothing_to_do_skips_setup(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES)
+    bag().compute(prefetch=0, dir=tmp_path)
+    setups: list[int] = []
+
+    def fn(items: list[LoadedItem], ctx: None) -> list[Output]:
+        return upper_md(items)
+
+    run = Bag.from_bucket(SRC).map_batches(fn, setup=lambda: setups.append(1))
+    stats = run.to_bucket(OUT, done=".md").compute(prefetch=0, dir=tmp_path)
+    assert (stats.skipped, stats.processed, setups) == (len(PAGES), 0, [])
+
+
 def test_a_run_with_nothing_to_do_has_no_verdict(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.seed(SRC, PAGES)
     bag().compute(prefetch=0, dir=tmp_path)

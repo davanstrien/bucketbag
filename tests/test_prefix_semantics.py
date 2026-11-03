@@ -10,6 +10,9 @@ so the directory assertions fail if the client-side guards are removed.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from conftest import count_bb_dirs
 from fake_bucket import FakeBucket
 
@@ -39,7 +42,7 @@ def listed(bucket: FakeBucket, prefix: str) -> list[str]:
     return [f.path for f in bucket.list_bucket_tree("ns/b", prefix=prefix, recursive=True)]
 
 
-def test_fake_server_over_matches_after_first_page(bucket: FakeBucket):
+def test_fake_server_over_matches_after_first_page(bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, TREE)
     assert listed(bucket, "a/b/") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
     assert listed(bucket, "a/b") == ["a/b/x1", "a/b/x2", "a/b/x3", "a/bc/y"]
@@ -50,20 +53,20 @@ def test_fake_server_over_matches_after_first_page(bucket: FakeBucket):
 # --- iter_keys --------------------------------------------------------------------------
 
 
-def test_iter_keys_trailing_slash_means_directory(bucket: FakeBucket):
+def test_iter_keys_trailing_slash_means_directory(bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, TREE)
     assert list(iter_keys("ns/b", prefix="a/b/")) == A_B
     # The prefix reaches the server verbatim (slash kept) so page 1 is narrowed correctly.
     assert bucket.list_prefixes == ["a/b/"]
 
 
-def test_iter_keys_no_slash_keeps_string_prefix_semantics(bucket: FakeBucket):
+def test_iter_keys_no_slash_keeps_string_prefix_semantics(bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, TREE)
     # Documented: without a trailing slash, siblings sharing the string prefix are included.
     assert list(iter_keys("ns/b", prefix="a/b")) == A_B + ["a/bc/y"]
 
 
-def test_iter_keys_embedded_bucket_prefix_keeps_string_semantics(bucket: FakeBucket):
+def test_iter_keys_embedded_bucket_prefix_keeps_string_semantics(bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, TREE)
     # "ns/b/a/b" embeds the prefix in the bucket ref; _parse_bucket strips slashes, so this is
     # the string-prefix form. Passing prefix= explicitly is the way to get directory semantics.
@@ -71,7 +74,7 @@ def test_iter_keys_embedded_bucket_prefix_keeps_string_semantics(bucket: FakeBuc
     assert [f.path for f in iter_keys("ns/b", prefix="a/b/", objects=True)] == A_B
 
 
-def test_iter_keys_include_derived_prefix_is_directory_scoped(bucket: FakeBucket):
+def test_iter_keys_include_derived_prefix_is_directory_scoped(bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, TREE)
     # The literal head of the glob ("a/b/") is sent as the prefix; the glob itself would
     # already exclude a/bc/y, so this pins that the two filters agree.
@@ -82,14 +85,14 @@ def test_iter_keys_include_derived_prefix_is_directory_scoped(bucket: FakeBucket
 # --- batched_files (keys derived from prefix) ---------------------------------------------
 
 
-def test_batched_files_prefix_directory(bucket: FakeBucket, tmp_path):
+def test_batched_files_prefix_directory(bucket: FakeBucket, tmp_path: Path) -> None:
     overmatching_bucket(bucket, TREE)
     batches = list(batched_files("ns/b", prefix="a/b/", prefetch=0, dir=tmp_path))
     assert [[it.key for it in b] for b in batches] == [A_B]
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_batched_files_prefix_no_slash(bucket: FakeBucket, tmp_path):
+def test_batched_files_prefix_no_slash(bucket: FakeBucket, tmp_path: Path) -> None:
     overmatching_bucket(bucket, TREE)
     batches = list(batched_files("ns/b", prefix="a/b", prefetch=0, dir=tmp_path))
     assert [[it.key for it in b] for b in batches] == [A_B + ["a/bc/y"]]
@@ -101,7 +104,7 @@ def test_batched_files_prefix_no_slash(bucket: FakeBucket, tmp_path):
 SHARDS = ["out/r1/0.parquet", "out/r1/1.parquet", "out/r1/2.parquet", "out/r10/0.parquet"]
 
 
-def test_completed_keys_prefix_directory(fake_parquet, bucket: FakeBucket):
+def test_completed_keys_prefix_directory(fake_parquet: SimpleNamespace, bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, SHARDS)
     assert completed_keys("ns/b", prefix="out/r1/") == {
         "out/r1/0.parquet",
@@ -110,7 +113,7 @@ def test_completed_keys_prefix_directory(fake_parquet, bucket: FakeBucket):
     }
 
 
-def test_completed_keys_prefix_no_slash(fake_parquet, bucket: FakeBucket):
+def test_completed_keys_prefix_no_slash(fake_parquet: SimpleNamespace, bucket: FakeBucket) -> None:
     overmatching_bucket(bucket, SHARDS)
     assert completed_keys("ns/b", prefix="out/r1") == {
         "out/r1/0.parquet",

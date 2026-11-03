@@ -264,8 +264,8 @@ class Bag:
     ) -> Bag:
         """Set the per-batch function: ``fn(items) -> iterable[(key, bytes|str)]``.
 
-        With ``setup`` (e.g. a model loader), ``setup()`` runs once per ``compute()`` or
-        ``take()``, and ``fn`` is called as ``fn(items, ctx)`` with its result.
+        With ``setup`` (e.g. a model loader), ``setup()`` runs at most once per ``compute()``
+        or ``take()``, and ``fn`` is called as ``fn(items, ctx)`` with its result.
         ``batch_size``/``max_bytes`` bound each batch by file count/total bytes; at least one
         must be set, and each must be at least 1.
         """
@@ -362,6 +362,11 @@ class Bag:
             self.max_bytes,
             prefetch,
         )
+        if not todo:  # nothing to do: skip setup() (a model load) and the downloads
+            seconds = time.monotonic() - t0
+            stats = BagStats(processed=0, skipped=skipped, batches=0, outputs=0, seconds=seconds)
+            logger.info("Bag.compute: %s", stats)
+            return stats
         apply = _with_context(fn, self.setup)
         batches = batched_files(
             self.src,
