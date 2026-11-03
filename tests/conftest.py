@@ -22,7 +22,7 @@ from huggingface_hub import BucketFile
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "internals: reaches private names (_pack, _parse_bucket, _glob_*, LoadedItem._bytes). "
+        "internals: reaches private names (_pack, BucketRef, _glob_*, LoadedItem's byte cache). "
         "A restructure may rewrite these tests; `pytest -m 'not internals'` must pass unchanged.",
     )
 

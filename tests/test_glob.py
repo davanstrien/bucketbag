@@ -1,4 +1,4 @@
-"""Tests for the glob engine: ``_glob_to_re`` and ``_glob_prefix``."""
+"""Tests for the glob rules (fsspec's, as in ``HfFileSystem.glob``) and ``_glob_prefix``."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from bucketbag import _glob_prefix, _glob_to_re
+from bucketbag._core import _glob_prefix, _glob_to_re
 
 pytestmark = pytest.mark.internals
 
@@ -26,8 +26,11 @@ _LITERAL = st.characters(blacklist_categories=("Cs",), blacklist_characters="*?[
         ("**/*.jp2", "a.jp2", True),
         ("**/*.jp2", "dir/a.jp2", True),
         ("**/*.jp2", "a/b/c/a.jp2", True),
-        # `**` (no slash) matches across `/`.
-        ("a**z", "a/b/c/z", True),
+        # `**` as a whole segment matches across `/`.
+        ("a/**", "a/b/c/z", True),
+        # `[...]` is a character class.
+        ("[ab].txt", "a.txt", True),
+        ("[ab].txt", "c.txt", False),
         # `?` matches exactly one non-`/` char.
         ("?.txt", "a.txt", True),
         ("?.txt", "ab.txt", False),
@@ -40,6 +43,12 @@ _LITERAL = st.characters(blacklist_categories=("Cs",), blacklist_characters="*?[
 )
 def test_glob_to_re_cases(pattern, key, matches):
     assert bool(_glob_to_re(pattern).match(key)) is matches
+
+
+@pytest.mark.parametrize("pattern", ["a**z", "**.jp2", "pages/**.md"])
+def test_double_star_inside_a_name_is_refused(pattern):
+    with pytest.raises(ValueError, match="own path segment"):
+        _glob_to_re(pattern)
 
 
 def test_glob_to_re_cache_returns_same_object():

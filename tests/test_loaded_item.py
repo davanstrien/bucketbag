@@ -18,9 +18,9 @@ def test_bytes_reads_and_caches(tmp_path: Path):
     f = tmp_path / "x.bin"
     f.write_bytes(b"payload")
     it = LoadedItem(key="k", path=f)
-    assert it._bytes is None
+    assert "bytes" not in vars(it)
     assert it.bytes == b"payload"
-    assert it._bytes == b"payload"  # cached now
+    assert vars(it)["bytes"] == b"payload"  # cached now
     # second read hits the cache, not disk (delete the file to prove it)
     f.unlink()
     assert it.bytes == b"payload"
