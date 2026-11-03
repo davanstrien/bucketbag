@@ -130,7 +130,10 @@ def test_a_worker_error_does_not_stop_the_cleanup(bucket: FakeBucket, tmp_path: 
     bucket.download_error = SystemExit  # a BaseException stored in a queued download
     batches = batched_files(SRC, keys=files, n=1, prefetch=3, dir=tmp_path)
     next(batches)
-    time.sleep(0.05)  # let the queued downloads finish
+    deadline = time.monotonic() + 5
+    while bucket.calls["download"] < 4 and time.monotonic() < deadline:
+        time.sleep(0.005)  # until all four queued downloads, batch 2 included, have started
+    assert bucket.calls["download"] == 4
     batches.close()
     assert count_bb_dirs(tmp_path) == 0
 
@@ -472,8 +475,11 @@ def test_completed_keys_skips_an_unreadable_shard(
 # --- 6. Run report ----------------------------------------------------------------------
 
 
+SLOW = 0.1  # per batch in the slow stage; the fake's other stages take well under 1 ms
+
+
 def slow_map(items: list[LoadedItem]) -> list[Output]:
-    time.sleep(0.03)
+    time.sleep(SLOW)
     return upper_md(items)
 
 
@@ -491,11 +497,11 @@ def test_stats_name_the_slowest_stage_and_what_to_change(
     bucket.seed(SRC, PAGES)
     fn = upper_md
     if stage == "download":
-        bucket.download_seconds = 0.03
+        bucket.download_seconds = SLOW
     elif stage == "map":
         fn = slow_map
     else:
-        bucket.upload_seconds = 0.03
+        bucket.upload_seconds = SLOW
     run = Bag.from_bucket(SRC).map_batches(fn, batch_size=2).to_bucket(OUT, done=".md")
     stats = run.compute(prefetch=0, dir=tmp_path)
     assert stats.bound_by == stage
@@ -529,6 +535,18 @@ def test_progress_is_logged_with_the_time_split(
     assert "bound by" in messages[-1]  # the run report at the end
 
 
+def test_the_progress_line_states_rate_and_time_left(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="bucketbag"):
+        bucketbag.bag._log_progress(50, 150, 100.0, "download wait 5%, map 90%, upload 5%")
+        bucketbag.bag._log_progress(0, 150, 0.0, "download wait 0%, map 0%, upload 0%")
+    first, second = (r.getMessage() for r in caplog.records)
+    assert (
+        first
+        == "50/150 inputs, 0.5/s, about 3 min left; time: download wait 5%, map 90%, upload 5%"
+    )
+    assert second.startswith("0/150 inputs, 0.0/s; time:")  # no rate yet, so no time left
+
+
 def test_logs_reach_stderr_until_the_caller_configures_logging(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -556,7 +574,8 @@ def test_a_too_small_scratch_dir_is_reported(
         monkeypatch.setattr(bucketbag._hub.shutil, "disk_usage", disk_with(free))
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="bucketbag"):
-            list(batched_files(SRC, keys=files, n=2, prefetch=2, dir=tmp_path))
+            batches = list(batched_files(SRC, keys=files, n=2, prefetch=2, dir=tmp_path))
+        assert len(batches) == 3  # the check reads the batches without using them up
         assert any("GB is free" in r.getMessage() for r in caplog.records) is warns
 
 

@@ -56,7 +56,7 @@ _HINTS: dict[Stage, str] = {
     "upload": "Uploads are the limit: write fewer, larger outputs, or raise batch_size.",
 }
 
-# How often compute() and take() log a progress line, in seconds.
+# The shortest gap between two progress lines, in seconds (lines come after a batch).
 _PROGRESS_EVERY_S = 30.0
 
 
@@ -73,10 +73,11 @@ def _shares(wait_s: float, map_s: float, upload_s: float) -> str:
 class BagStats:
     """What a :meth:`Bag.compute` run did, and where its time went.
 
-    ``wait_s`` is time spent waiting for downloads, ``map_s`` time in the map function and
-    ``upload_s`` time writing outputs. ``bound_by`` names the largest of the three and ``hint``
-    the setting to change, so a person or an agent can tune the next run. The three exclude
-    ``setup()`` and listing; ``seconds`` includes them.
+    ``wait_s`` is time spent waiting for the next batch (its download, plus deleting the last
+    batch's files), ``map_s`` time in the map function and ``upload_s`` time writing outputs.
+    ``bound_by`` names the largest of the three and ``hint`` the setting to change, so a person
+    or an agent can tune the next run. The three exclude ``setup()`` and listing; ``seconds``
+    includes them.
     """
 
     processed: int
@@ -167,7 +168,7 @@ def _run(
     """Map every batch and hand its outputs to ``sink``, timing each stage.
 
     Warns once per run about an input whose ``key + done`` output is missing, and logs a
-    progress line every ``_PROGRESS_EVERY_S`` seconds.
+    progress line after a batch, at most every ``_PROGRESS_EVERY_S`` seconds.
     """
     inputs = count = outputs = 0
     wait_s = map_s = upload_s = 0.0

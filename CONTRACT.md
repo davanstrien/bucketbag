@@ -92,14 +92,15 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 
 ## 6. Run report (`Bag`)
 
-- `compute()` returns `BagStats` with the time spent waiting for downloads (`wait_s`), in the
-  map function (`map_s`) and writing outputs (`upload_s`). The three exclude `setup()` and
+- `compute()` returns `BagStats` with the time spent waiting for the next batch (`wait_s`: its
+  download, plus deleting the last batch's files), in the map function (`map_s`) and writing
+  outputs (`upload_s`). The three exclude `setup()` and
   listing; `seconds` includes them. `bound_by` names the largest of the three and `hint` the
   setting to change. When no batch ran, `bound_by` is `None` and `hint` is `""`.
   `print(stats)` shows the split and the verdict.
 - `compute()` logs its settings when it starts and its `BagStats` when it ends. `compute()` and
-  `take()` log a progress line every 30 seconds: inputs done out of the total, the rate, the
-  time left and the split. All go to the `bucketbag` logger at INFO, and print to stderr as
+  `take()` log a progress line after a batch, at most every 30 seconds: inputs done out of the
+  total, the rate, the time left and the split. A long batch delays its line. All go to the `bucketbag` logger at INFO, and print to stderr as
   `[bucketbag] …` lines until the caller configures logging; then the caller's handlers get
   them.
 - `batched_files` warns before the first download when the largest `prefetch + 1` batches

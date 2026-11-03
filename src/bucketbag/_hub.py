@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import builtins
 import functools
+import heapq
 import json as _json
 import logging
 import os
@@ -260,16 +261,15 @@ def _download_batch(
 
 
 def _warn_if_scratch_is_small(
-    chunks: list[list[BucketFile | str]], prefetch: int, base_dir: Path
+    chunks: Iterable[list[BucketFile | str]], prefetch: int, base_dir: Path
 ) -> None:
     """Warn when the largest batches that can be on disk at once exceed the free space.
 
-    Only sized keys count, so string keys never warn.
+    One streaming pass that keeps only the ``prefetch + 1`` largest batch sizes. Only sized
+    keys count, so string keys never warn.
     """
-    sizes = sorted(
-        (sum(getattr(r, "size", 0) or 0 for r in chunk) for chunk in chunks), reverse=True
-    )
-    peak = sum(sizes[: prefetch + 1])
+    sizes = (sum(getattr(r, "size", 0) or 0 for r in chunk) for chunk in chunks)
+    peak = sum(heapq.nlargest(prefetch + 1, sizes))
     free = shutil.disk_usage(base_dir).free
     if peak > free:
         logger.warning(
@@ -376,9 +376,9 @@ def batched_files(
 
     api = HfApi(token=token)
     base_dir = _resolve_dir(dir)
-    packed = list(_pack(remotes, n, max_bytes))
-    _warn_if_scratch_is_small(packed, prefetch, base_dir)
-    chunks = iter(packed)
+    if any(isinstance(r, BucketFile) for r in remotes):  # only sized keys can warn
+        _warn_if_scratch_is_small(_pack(remotes, n, max_bytes), prefetch, base_dir)
+    chunks = _pack(remotes, n, max_bytes)
 
     def fetch(chunk: list[BucketFile | str]) -> _Batch:
         return _download_batch(api, ref.bucket_id, chunk, base_dir, token)

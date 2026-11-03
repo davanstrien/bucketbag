@@ -73,9 +73,10 @@ print(stats)  # for example:
 ```
 
 `stats.bound_by` (`"download"`, `"map"` or `"upload"`) and `stats.hint` tell a person or an
-agent what to tune next. `compute()` also logs its settings, a progress line every 30 s and the
-same report at the end. They print to stderr as `[bucketbag] …` lines, so they show up in
-`hf jobs logs`, until your script configures logging; then your handlers get them.
+agent what to tune next. `compute()` also logs its settings, a progress line after batches
+(at most every 30 s) and the same report at the end. They print to stderr as `[bucketbag] …`
+lines, so they show up in `hf jobs logs`, until your script configures logging; then your
+handlers get them.
 
 Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
 (`pages/p10.md` never marks `pages/p1` done). `compute()`
