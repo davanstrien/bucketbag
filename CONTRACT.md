@@ -51,8 +51,8 @@ when the loop ends. A caller that keeps the generator in a variable must call `.
 - `compute(resume=True)` without `done=` raises `ValueError` before anything is listed.
 - An input whose batch wrote no `k + done` output is logged as a warning, once per `compute()`
   or `take()`. Resume cannot mark it done, so it runs again on every re-run.
-- `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs once per
-  `compute()` or `take()`.
+- `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs at most
+  once per `compute()` or `take()`.
 
 ## 4. Failures (`Bag.compute`)
 

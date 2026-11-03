@@ -264,8 +264,8 @@ class Bag:
     ) -> Bag:
         """Set the per-batch function: ``fn(items) -> iterable[(key, bytes|str)]``.
 
-        With ``setup`` (e.g. a model loader), ``setup()`` runs once per ``compute()`` or
-        ``take()``, and ``fn`` is called as ``fn(items, ctx)`` with its result.
+        With ``setup`` (e.g. a model loader), ``setup()`` runs at most once per ``compute()``
+        or ``take()``, and ``fn`` is called as ``fn(items, ctx)`` with its result.
         ``batch_size``/``max_bytes`` bound each batch by file count/total bytes; at least one
         must be set, and each must be at least 1.
         """
