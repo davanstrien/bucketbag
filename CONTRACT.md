@@ -47,6 +47,7 @@ when the loop ends. A caller that keeps the generator in a variable must call `.
   when `k + ".md"` exists under `out` (`pages/p1.jp2` → `pages/p1.jp2.md`). The lookup is exact,
   so no other output can mark `k` done (`pages/p10.md` never marks `pages/p1`). `compute()`
   processes only inputs that are not done; `compute(resume=False)` processes all of them.
+  With nothing to do, `compute()` returns without running `setup()`.
 - `compute(resume=True)` without `done=` raises `ValueError` before anything is listed.
 - An input whose batch wrote no `k + done` output is logged as a warning, once per `compute()`
   or `take()`. Resume cannot mark it done, so it runs again on every re-run.

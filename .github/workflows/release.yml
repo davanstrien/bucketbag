@@ -25,4 +25,5 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: astral-sh/setup-uv@v6
       - run: uv build --no-config
-      - run: uv publish --trusted-publishing always
+      # --check-url: a re-run after a partial upload skips files PyPI already has
+      - run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/

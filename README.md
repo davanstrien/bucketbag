@@ -1,7 +1,7 @@
 # bucketbag
 
 **Experimental.** A small, [toolz](https://toolz.readthedocs.io/)-style library for batch-processing
-**large collections of Hugging Face bucket files** — an experiment in what bucket-scale batch work
+**large collections of files in [Hugging Face buckets](https://huggingface.co/docs/hub/en/storage-buckets)** — an experiment in what bucket-scale batch work
 wants as an interface:
 
 - **Bounded scratch** — download a batch, process, delete, repeat. Peak footprint ≈ `(prefetch + 1) × max_bytes`, never the corpus.
@@ -9,7 +9,7 @@ wants as an interface:
 - **Zero cleanup code** — temp files removed as the loop advances, even on exceptions.
 - **Throughput knobs** — prefetch overlaps download with compute; `boost()` raises xet's small-file concurrency.
 
-Mounting a bucket (`-v hf://buckets/...`) is the simplest way to use one; bucketbag explores the
+Mounting a bucket in a Job (`hf jobs run -v hf://buckets/...`) is the simplest way to use one; bucketbag explores the
 **explicit API path** for batch workloads where footprint, resume, and concurrency should be under
 your control. Not faster than the raw API (same transport), and not a framework.
 
@@ -83,10 +83,12 @@ Resume: `done=".md"` names the output that marks an input done, and the lookup i
 (`pages/p10.md` never marks `pages/p1` done). `compute()` runs in-process today; fanning the same
 plan across HF Jobs (one shard per job) is the next layer.
 
-To follow a bucket that another job is still filling, re-run the plan; each pass lists the
-bucket again and skips what is done:
+To follow a bucket that another job is still filling, re-run the plan. Each pass lists both
+buckets again and skips what is done; `setup()` runs only when a pass has work:
 
 ```python
+import time
+
 while producer_running():
     bag.compute()
     time.sleep(60)

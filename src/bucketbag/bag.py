@@ -362,6 +362,11 @@ class Bag:
             self.max_bytes,
             prefetch,
         )
+        if not todo:  # nothing to do: skip setup() (a model load) and the downloads
+            seconds = time.monotonic() - t0
+            stats = BagStats(processed=0, skipped=skipped, batches=0, outputs=0, seconds=seconds)
+            logger.info("Bag.compute: %s", stats)
+            return stats
         apply = _with_context(fn, self.setup)
         batches = batched_files(
             self.src,

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — 2026-11
+## 0.4.0 — 2026-11-03
 
 A rewrite of the internals around a written contract (CONTRACT.md), plus a run report for
 agents. First release on PyPI: `pip install bucketbag`.
@@ -29,7 +29,7 @@ agents. First release on PyPI: `pip install bucketbag`.
 - **`batched_files(max_workers=)` is removed**; `prefetch` sets the number of download threads.
 - **`LoadedItem` is frozen.** Assigning to `item.key` or `item.path` raises
   `FrozenInstanceError`; build a new `LoadedItem(key=..., path=...)` instead.
-- **Dependency floors:** `huggingface-hub>=1.21`, `fsspec>=2023.12`.
+- **Dependency floors:** `huggingface-hub>=1.21`, `fsspec>=2023.12`, `hf-xet>=1.5.2`.
 
 ### New
 
@@ -40,7 +40,9 @@ agents. First release on PyPI: `pip install bucketbag`.
   print to stderr as `[bucketbag] …` until your script configures logging.
 - A warning before the first download when the largest `prefetch + 1` batches would not fit in
   the scratch dir (on `/dev/shm`, running out kills the process).
-- `Bag.compute()` warns once when an input wrote no `k + done` output (it would rerun forever).
+- `Bag.compute()` and `take()` warn once when an input wrote no `k + done` output (it would
+  rerun forever).
+- `Bag.compute()` with nothing left to do returns without running `setup()` (no model load).
 - `py.typed`: the package is fully typed.
 
 ### Fixed
@@ -49,7 +51,6 @@ agents. First release on PyPI: `pip install bucketbag`.
 - Temp files no longer leak when Ctrl-C arrives during a download wait, or when a queued
   download stored a `BaseException`.
 - `Bag.take()` honours `max_bytes`.
-- `completed_keys` reads each shard's footer once.
 
 ### Internal
 
