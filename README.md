@@ -64,14 +64,15 @@ from bucketbag import Bag
 
 bag = (Bag.from_bucket(SRC, include="**/*.jp2")
          .map_batches(ocr_batch, batch_size=32, setup=load_model)   # fn(items[, ctx]) -> [(key, content)]
-         .to_bucket(OUT))
+         .to_bucket(OUT, done=".md"))                                  # input k is done once k + ".md" exists
 bag.take(3)        # dev peek: outputs only, nothing written
 bag.compute()      # list -> skip done -> download -> fn -> put_files; kill + re-run safe
 ```
 
-Resume contract: an input is done iff an output key **starts with** its source key. `compute()`
+Resume: `done=".md"` names the output that marks an input done, and the lookup is exact
+(`pages/p10.md` never marks `pages/p1` done). `compute()`
 runs in-process today; fanning the same plan across HF Jobs (one shard per job) is the next layer.
-[CONTRACT.md](CONTRACT.md) states what bucketbag promises, and marks the rules it still breaks.
+[CONTRACT.md](CONTRACT.md) states what bucketbag promises; the tests check each rule.
 
 ## API
 
@@ -83,10 +84,11 @@ runs in-process today; fanning the same plan across HF Jobs (one shard per job) 
 | `completed_keys(out_bucket, *, prefix, column="__source_key")` | done-set from parquet outputs |
 | `boost(*, file_concurrency=32)` | raise xet download concurrency (~2.5× on small files) |
 | `LoadedItem` | `.key` `.path` + lazy `.bytes` `.image` `.text()` `.json()` |
-| `Bag.from_bucket(...).map_batches(fn).to_bucket(out)` + `.take(n)` / `.compute()` | the loop as a lazy plan |
+| `Bag.from_bucket(...).map_batches(fn).to_bucket(out, done=".md")` + `.take(n)` / `.compute()` | the loop as a lazy plan |
 
-`bucket` = `"ns/bucket"`, `"ns/bucket/prefix"`, or `"hf://buckets/ns/bucket/prefix"`.
-Globs: `*` within a path segment, `**` across `/`.
+`bucket` = `"ns/bucket"`, `"ns/bucket/prefix"`, `"hf://buckets/ns/bucket/prefix"`, or a Hub web URL.
+`prefix=` joins below a prefix inside `bucket`, as a directory.
+Globs follow fsspec's rules (as in `HfFileSystem.glob`): `*` within a path segment, `**` across `/`.
 `prefix` is a string prefix and the trailing slash matters: `prefix="a/b/"` lists the
 directory `a/b` only; `prefix="a/b"` also matches siblings like `a/bc/y`. The prefix is sent
 verbatim to the Hub. Bucketbag also checks each returned key against it as a cheap safeguard

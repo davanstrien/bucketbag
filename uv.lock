@@ -26,6 +26,7 @@ name = "bucketbag"
 version = "0.3.1"
 source = { editable = "." }
 dependencies = [
+    { name = "fsspec" },
     { name = "hf-xet" },
     { name = "huggingface-hub" },
     { name = "pillow" },
@@ -43,8 +44,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fsspec", specifier = ">=2023.12" },
     { name = "hf-xet", specifier = ">=1.5.2" },
-    { name = "huggingface-hub", specifier = ">=1.12" },
+    { name = "huggingface-hub", specifier = ">=1.21" },
     { name = "pillow" },
     { name = "toolz" },
 ]

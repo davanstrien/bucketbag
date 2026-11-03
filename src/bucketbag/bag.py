@@ -1,4 +1,4 @@
-"""``Bag`` — a lazy, dask.bag-style plan over bucket files (P0: local execution only).
+"""``Bag`` — a lazy, dask.bag-style plan over bucket files (local execution).
 
 The chain is a *plan*, not work: nothing lists or downloads until :meth:`Bag.compute` /
 :meth:`Bag.take`. One shape, three verbs::
@@ -7,45 +7,32 @@ The chain is a *plan*, not work: nothing lists or downloads until :meth:`Bag.com
 
     bag = (Bag.from_bucket(SRC, include="**/*.jp2")
              .map_batches(ocr_batch, batch_size=32, setup=load_model)
-             .to_bucket(OUT))
+             .to_bucket(OUT, done=".md"))
     bag.take(3)        # dev: run the fn on the first few items, return outputs, write nothing
     bag.compute()      # run: list -> skip done -> batched download -> fn -> put_files, bounded
 
-The user fn receives a ``list[LoadedItem]`` (plus the ``setup()`` result if given) and returns
-an iterable of ``(key, content)`` pairs — content is ``bytes`` or ``str``. Outputs land under
-the ``to_bucket`` prefix in one API call per batch.
+The map function receives a ``list[LoadedItem]`` (plus the ``setup()`` result if given) and
+returns an iterable of ``(key, content)`` pairs — content is ``bytes`` or ``str``. Outputs land
+under the ``to_bucket`` prefix in one API call per batch.
 
-**Resume contract:** an input is "done" iff some output key *starts with* its source key
-(e.g. ``pages/p1.jp2`` -> ``pages/p1.jp2.md``). Emit output keys prefixed by ``item.key`` and
-``compute(resume=True)`` (the default) skips finished inputs on re-run — crash-safe long runs
-with no bookkeeping.
-
-This is the P0 slice of the bucketbag design: no Jobs fan-out, no shards, no executors —
-``compute()`` runs in-process. The fan-out layer (``JobsExecutor``) builds on exactly this
-plan object later.
+**Resume:** ``to_bucket(out, done=".md")`` names the output that marks an input done. An input
+``k`` is done when ``k + ".md"`` exists under ``out``, so ``compute()`` (``resume=True`` by
+default) skips it on a re-run. The lookup is exact: no other key can mark ``k`` done.
 """
 
 from __future__ import annotations
 
-import bisect
 import os
 import time
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar, overload
 
 from huggingface_hub import BucketFile
 
-from . import (
-    LoadedItem,
-    _check_batch_settings,
-    _list_bucketfiles,
-    _parse_bucket,
-    batched_files,
-    iter_keys,
-    logger,
-    put_files,
-)
+from ._core import BucketRef, _check_batch_settings, _split_done
+from ._hub import LoadedItem, _list_bucketfiles, batched_files, logger, put_files
 
 __all__ = ["Bag", "BagStats"]
 
@@ -85,30 +72,43 @@ def _with_context(
     return lambda items: fn(items, ctx)
 
 
-def _unmatched_output(pairs: list[Output], items: list[LoadedItem]) -> str | None:
-    """The first output key that starts with no input key of its batch, else ``None``.
-
-    Looks up each prefix of the output key in a set, so a large batch stays cheap.
-    """
-    inputs = {item.key for item in items}
-    for key, _ in pairs:
-        if not any(key[:end] in inputs for end in range(len(key), 0, -1)):
-            return key
-    return None
-
-
-def _warn_if_unmatched(pairs: list[Output], items: list[LoadedItem]) -> bool:
-    """Log a warning if an output key cannot mark its input done; return whether it did."""
-    orphan = _unmatched_output(pairs, items)
-    if orphan is None:
+def _warn_if_not_done(batch: list[LoadedItem], pairs: list[Output], done: str) -> bool:
+    """Log a warning if an input got no ``key + done`` output; return whether it did."""
+    written = {k for k, _ in pairs}
+    key = next((item.key for item in batch if item.key + done not in written), None)
+    if key is None:
         return False
     logger.warning(
-        "Output key %r does not start with an input key of its batch, so resume cannot mark "
-        "that input done and it runs again on every re-run. Name each output "
-        "<input key><suffix>, e.g. 'pages/p1.jp2.md'.",
-        orphan,
+        "Input %r produced no %r output, so resume cannot mark it done and it runs again on "
+        "every re-run. Write <input key>%s for each input, or change to_bucket(done=...).",
+        key,
+        key + done,
+        done,
     )
     return True
+
+
+def _run(
+    apply: Callable[[list[LoadedItem]], Iterable[Output]],
+    batches: Iterable[list[LoadedItem]],
+    sink: Callable[[list[Output]], None],
+    done: str | None,
+) -> tuple[int, int, int]:
+    """Map every batch and hand its outputs to ``sink``; return (inputs, batches, outputs).
+
+    Warns once per run about an input whose ``key + done`` output is missing.
+    """
+    inputs = count = outputs = 0
+    warned = False
+    for batch in batches:
+        pairs = list(apply(batch))
+        if done is not None and not warned:
+            warned = _warn_if_not_done(batch, pairs, done)
+        sink(pairs)
+        inputs += len(batch)
+        count += 1
+        outputs += len(pairs)
+    return inputs, count, outputs
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,7 @@ class Bag:
     batch_size: int | None = 32
     max_bytes: float | None = None
     out: str | None = None
+    done: str | None = None
 
     # -- constructors / transforms (each returns a NEW Bag) --------------------
     @classmethod
@@ -137,7 +138,7 @@ class Bag:
         limit: int | None = None,
         token: str | bool | None = None,
     ) -> Bag:
-        """Start a plan over ``bucket`` (``ns/bucket[/prefix]`` or ``hf://buckets/...``)."""
+        """Start a plan over ``bucket`` (a reference as in :func:`~bucketbag.iter_keys`)."""
         return cls(src=bucket, include=include, exclude=exclude, limit=limit, token=token)
 
     @overload
@@ -178,17 +179,20 @@ class Bag:
         _check_batch_settings(batch_size, max_bytes)
         return replace(self, fn=fn, setup=setup, batch_size=batch_size, max_bytes=max_bytes)
 
-    def to_bucket(self, out: str) -> Bag:
-        """Set the output bucket/prefix for the fn's ``(key, content)`` pairs."""
-        return replace(self, out=out)
+    def to_bucket(self, out: str, *, done: str | None = None) -> Bag:
+        """Set where the fn's ``(key, content)`` pairs land, and which output marks an input done.
+
+        ``done`` is a suffix: an input ``k`` is done when ``k + done`` exists under ``out``
+        (``done=".md"`` for ``pages/p1.jp2`` -> ``pages/p1.jp2.md``). ``compute(resume=True)``
+        needs it.
+        """
+        return replace(self, out=out, done=done)
 
     # -- execution --------------------------------------------------------------
     def _list_inputs(self, *, limit: int | None) -> list[BucketFile]:
         """List source inputs as ``BucketFile`` objects (sizes -> max_bytes + fast download)."""
-        bucket_id, embedded = _parse_bucket(self.src)
         return _list_bucketfiles(
-            bucket_id,
-            prefix=embedded or None,
+            BucketRef.parse(self.src),
             include=self.include,
             exclude=self.exclude,
             start_after=None,
@@ -196,24 +200,13 @@ class Bag:
             token=self.token,
         )
 
-    def _list_todo(self, *, resume: bool) -> tuple[list[BucketFile], int]:
+    def _list_todo(self, out: str, done: str) -> tuple[list[BucketFile], int]:
         files = self._list_inputs(limit=self.limit)
-        if not (resume and self.out):
-            return files, 0
-        # Output keys come back as full bucket paths; put_files prepended any prefix embedded
-        # in `out`, so strip it symmetrically before matching against source keys.
-        _, out_prefix = _parse_bucket(self.out)
-        strip = f"{out_prefix}/" if out_prefix else ""
-        out_keys = sorted(
-            k[len(strip) :] for k in iter_keys(self.out, token=self.token) if k.startswith(strip)
+        out_ref = BucketRef.parse(out)
+        existing = _list_bucketfiles(
+            out_ref, include=None, exclude=None, start_after=None, limit=None, token=self.token
         )
-
-        def is_done(key: str) -> bool:
-            i = bisect.bisect_left(out_keys, key)
-            return i < len(out_keys) and out_keys[i].startswith(key)
-
-        todo = [f for f in files if not is_done(f.path)]
-        return todo, len(files) - len(todo)
+        return _split_done(files, (f.path for f in existing), out_ref, done)
 
     def take(self, n: int, *, dir: str | os.PathLike[str] | None = None) -> list[Output]:
         """Dev peek: run the plan on the first ``n`` items and return the outputs. No writes."""
@@ -223,8 +216,7 @@ class Bag:
         files = self._list_inputs(limit=n)
         apply = _with_context(fn, self.setup)
         outputs: list[Output] = []
-        warned = False
-        for batch in batched_files(
+        batches = batched_files(
             self.src,
             keys=files,
             n=self.batch_size,
@@ -232,10 +224,11 @@ class Bag:
             prefetch=0,
             dir=dir,
             token=self.token,
-        ):
-            pairs = list(apply(batch))
-            warned = warned or _warn_if_unmatched(pairs, batch)
-            outputs.extend(pairs)
+        )
+        # Closed here, not left to garbage collection: a caller that keeps a raised exception
+        # also keeps this frame, and with it the generator and its temp files.
+        with closing(batches):
+            _run(apply, batches, outputs.extend, self.done)
         return outputs
 
     def compute(
@@ -248,23 +241,30 @@ class Bag:
         """Run the plan in-process: list, skip done (``resume``), download, map, write.
 
         Bounded scratch (via :func:`batched_files`), one ``put_files`` call per batch, and
-        resume-by-output-existence — safe to kill and re-run.
+        resume by the ``to_bucket(done=...)`` output — safe to kill and re-run.
         """
-        fn = self.fn
+        fn, out, done = self.fn, self.out, self.done
         if fn is None:
             raise ValueError("compute() needs a map_batches(fn) stage")
-        if self.out is None:
+        if out is None:
             raise ValueError("compute() needs a to_bucket(out) stage")
+        if resume and done is None:
+            raise ValueError(
+                "compute(resume=True) needs to know which output marks an input done: use "
+                "to_bucket(out, done='.md') when each input k writes k + '.md', or "
+                "compute(resume=False) to process every input."
+            )
         _check_batch_settings(self.batch_size, self.max_bytes, prefetch)
 
-        todo, skipped = self._list_todo(resume=resume)
+        if resume and done is not None:
+            todo, skipped = self._list_todo(out, done)
+        else:
+            todo, skipped = self._list_inputs(limit=self.limit), 0
         if skipped:
             logger.info("Bag.compute: %d inputs already done, %d to do", skipped, len(todo))
         t0 = time.monotonic()
         apply = _with_context(fn, self.setup)
-        processed = batches = outputs = 0
-        warned = False
-        for batch in batched_files(
+        batches = batched_files(
             self.src,
             keys=todo,
             n=self.batch_size,
@@ -272,17 +272,17 @@ class Bag:
             prefetch=prefetch,
             dir=dir,
             token=self.token,
-        ):
-            pairs = list(apply(batch))
-            warned = warned or _warn_if_unmatched(pairs, batch)
-            put_files(pairs, self.out, token=self.token)
-            processed += len(batch)
-            batches += 1
-            outputs += len(pairs)
+        )
+
+        def upload(pairs: list[Output]) -> None:
+            put_files(pairs, out, token=self.token)
+
+        with closing(batches):  # see take(): a kept exception must not keep the temp files
+            processed, count, outputs = _run(apply, batches, upload, done)
         return BagStats(
             processed=processed,
             skipped=skipped,
-            batches=batches,
+            batches=count,
             outputs=outputs,
             seconds=time.monotonic() - t0,
         )

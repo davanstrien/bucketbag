@@ -13,7 +13,7 @@ from huggingface_hub import BucketFile
 from hypothesis import given
 from hypothesis import strategies as st
 
-from bucketbag import _pack
+from bucketbag._core import _pack
 
 pytestmark = pytest.mark.internals
 

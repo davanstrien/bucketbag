@@ -76,7 +76,7 @@ def test_any_failure_cleans_up_and_a_rerun_finishes_exactly_once(
 ) -> None:
     keys = [f"pages/p{i:02d}.jp2" for i in range(n_files)]
     fn = MapFunction(fail_on=faults.get("map"))
-    plan = Bag.from_bucket(SRC).map_batches(fn, batch_size=batch_size).to_bucket(OUT)
+    plan = Bag.from_bucket(SRC).map_batches(fn, batch_size=batch_size).to_bucket(OUT, done=".md")
 
     with pytest.MonkeyPatch.context() as mp, tempfile.TemporaryDirectory() as scratch:
         bucket = FakeBucket().install(mp)

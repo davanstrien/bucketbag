@@ -8,8 +8,11 @@ license = "MIT"
 authors = [{ name = "Daniel van Strien" }]
 keywords = ["huggingface", "buckets", "batch", "toolz", "dataset"]
 dependencies = [
-    "huggingface-hub>=1.12",
+    # 1.21: parse_hf_uri reads Hub web URLs (1.13 rejects them).
+    "huggingface-hub>=1.21",
     "hf-xet>=1.5.2",
+    # 2023.12: fsspec.utils.glob_translate, the glob rules HfFileSystem.glob uses.
+    "fsspec>=2023.12",
     "toolz",
     "pillow",
 ]

@@ -2,25 +2,28 @@
 
 What bucketbag promises. `tests/test_contract.py` checks each rule against an in-memory Hub
 (`tests/fake_bucket.py`) that follows the Hub's own listing rules. A rule marked **gap** is one
-today's code breaks; its test is a strict xfail until the fix lands.
+the code breaks; its test is a strict xfail until the fix lands. No gap is open.
 
 ## 1. Addressing
 
-- A bucket reference is `ns/bucket[/prefix]` or `hf://buckets/ns/bucket[/prefix]`.
-  **Gap:** a Hub web URL (`https://huggingface.co/buckets/ns/bucket/tree/prefix`) is not read
-  as a bucket.
+- A bucket reference is `ns/bucket[/prefix]`, `hf://buckets/ns/bucket[/prefix]` or a Hub web
+  URL (`https://huggingface.co/buckets/ns/bucket/tree/prefix`). Anything else raises
+  `ValueError`, including an `hf://` URI of a model or dataset.
 - A prefix is a string prefix of the key, as on the Hub. A trailing `/` limits it to one
   directory (`a/b/` lists `a/b/x`, not `a/bc/y`); without the slash, siblings match too.
   The same rule holds for `prefix=` and for a prefix inside the bucket reference.
-  **Gap:** a prefix inside the bucket reference loses its trailing slash.
-- Passing both a prefix inside the bucket reference and `prefix=` is not defined yet.
-- Globs (`include`, `exclude`) match the whole key from the bucket root. `*` stays inside one
-  path segment and `**` crosses `/`, as in `HfFileSystem.glob`. (`hf buckets sync --include`
-  uses `fnmatch`, where `*` also crosses `/`.)
+- `prefix=` joins below a prefix inside the reference, as directories: `ns/b/out` with
+  `prefix="part-"` lists `out/part-*`. `prefix=""` or `None` adds nothing.
+- Globs (`include`, `exclude`) match the whole key from the bucket root, with fsspec's rules,
+  the ones `HfFileSystem.glob` uses: `*` stays inside one path segment, `**` as a whole segment
+  crosses `/`, `?` is one character and `[...]` a character class. `**` inside a name
+  (`**.jp2`) raises `ValueError`; write `**/*.jp2`. (`hf buckets sync --include` uses
+  `fnmatch`, where `*` also crosses `/`.)
 - Listings return full keys from the bucket root, sorted, files only. `start_after` skips
   keys up to and including it. `limit` keeps the first `limit` keys in the Hub's listing
   order, which is lexical today but not documented (issue #9).
-- `put_files(pairs, "ns/bucket/prefix")` writes each key under that prefix.
+- `put_files(pairs, "ns/bucket/prefix")` writes each key under that prefix, joined as a
+  directory.
 
 ## 2. Temporary files
 
@@ -28,18 +31,25 @@ today's code breaks; its test is a strict xfail until the fix lands.
 the loop body raises, when the caller stops early, and for batches downloaded ahead
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
+At most `prefetch + 1` batches are on disk at once: the one you are processing and `prefetch`
+downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
+always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
+A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
+stay on disk.
+
 "Stops early" means the generator is closed. A `for` loop over `batched_files(...)` closes it
 when the loop ends. A caller that keeps the generator in a variable must call `.close()`
 (or use `contextlib.closing`); until then the current and lookahead batches stay on disk.
 
 ## 3. Resume (`Bag`)
 
-- An input is done when an output key under the `to_bucket` prefix starts with the input's key
-  (`pages/p1.jp2` → `pages/p1.jp2.md`). `compute()` processes only inputs that are not done;
-  `compute(resume=False)` processes all of them.
-- An output key that does not start with an input key of its batch is logged as a warning,
-  once per `compute()` or `take()`. Resume cannot match it, so that input runs again on every
-  re-run.
+- `to_bucket(out, done=".md")` names the output that marks an input done: an input `k` is done
+  when `k + ".md"` exists under `out` (`pages/p1.jp2` → `pages/p1.jp2.md`). The lookup is exact,
+  so no other output can mark `k` done (`pages/p10.md` never marks `pages/p1`). `compute()`
+  processes only inputs that are not done; `compute(resume=False)` processes all of them.
+- `compute(resume=True)` without `done=` raises `ValueError` before anything is listed.
+- An input whose batch wrote no `k + done` output is logged as a warning, once per `compute()`
+  or `take()`. Resume cannot mark it done, so it runs again on every re-run.
 - `take(n)` runs the plan on the first `n` inputs and writes nothing. `setup()` runs once per
   `compute()` or `take()`.
 
@@ -51,8 +61,8 @@ when the loop ends. A caller that keeps the generator in a variable must call `.
 | A download fails | `compute()` raises that error. Earlier batches' outputs stay. |
 | An upload fails | `compute()` raises that error. Outputs that landed before it count as done.* |
 
-In every row the temporary files are deleted, and a re-run processes exactly the inputs that
-have no output. Hypothesis checks this over random mixes of failures (`tests/test_fault_fuzz.py`).
+In every row the temporary files are deleted, and a re-run processes exactly the inputs whose
+`done` output is missing. Hypothesis checks this over random mixes of failures (`tests/test_fault_fuzz.py`).
 
 \* The server applies the files of an upload that succeed and reports the rest.
 huggingface_hub 2.x raises `BucketBatchError` on that report. 1.x checked only the HTTP status,

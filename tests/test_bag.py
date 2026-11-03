@@ -21,7 +21,7 @@ def _upper_md(items):
 def test_chain_is_lazy_and_immutable(bucket: FakeBucket):
     base = Bag.from_bucket("ns/src", include="**/*.bin")
     mapped = base.map_batches(_upper_md, batch_size=2)
-    final = mapped.to_bucket("ns/out")
+    final = mapped.to_bucket("ns/out", done=".md")
     assert base.fn is None and mapped.out is None and final.out == "ns/out"
     assert bucket.calls["list"] == 0  # nothing touched the "network" yet
 
@@ -31,7 +31,7 @@ def test_compute_end_to_end(bucket: FakeBucket, tmp_path):
     stats = (
         Bag.from_bucket("ns/src", include="**/*.bin")
         .map_batches(_upper_md, batch_size=2)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".md")
         .compute(prefetch=0, dir=tmp_path)
     )
     assert isinstance(stats, BagStats)
@@ -46,12 +46,12 @@ def test_compute_end_to_end(bucket: FakeBucket, tmp_path):
 
 def test_compute_resumes_by_output_existence(bucket: FakeBucket, tmp_path):
     bucket.seed("ns/src", [f"pages/p{i}.bin" for i in range(5)], data=b"xxxx")
-    # outputs for p0 and p3 already exist (keys prefixed by the source key)
+    # outputs for p0 and p3 already exist (source key + the done suffix)
     bucket.seed("ns/out", ["pages/p0.bin.md", "pages/p3.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".md")
         .compute(prefetch=0, dir=tmp_path)
     )
     assert (stats.processed, stats.skipped) == (3, 2)
@@ -59,14 +59,14 @@ def test_compute_resumes_by_output_existence(bucket: FakeBucket, tmp_path):
     assert done_keys == {"pages/p1.bin.md", "pages/p2.bin.md", "pages/p4.bin.md"}
 
 
-def test_resume_prefix_match_is_not_a_substring_match(bucket: FakeBucket, tmp_path):
-    # p1.bin.md must NOT mark p1.bin2 done; p10.bin outputs must not mark p1.bin done.
+def test_resume_matches_the_exact_done_output(bucket: FakeBucket, tmp_path):
+    # Only p1.bin + ".md" marks p1.bin done; p10.bin's output does not.
     bucket.seed("ns/src", ["p1.bin", "p10.bin"], data=b"xxxx")
     bucket.seed("ns/out", ["p10.bin.md"])
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".md")
         .compute(prefetch=0, dir=tmp_path)
     )
     assert (stats.processed, stats.skipped) == (1, 1)
@@ -84,7 +84,7 @@ def test_resume_with_embedded_out_prefix(bucket: FakeBucket, tmp_path):
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=10)
-        .to_bucket("ns/out/run1")
+        .to_bucket("ns/out/run1", done=".md")
         .compute(prefetch=0, dir=tmp_path)
     )
     # p0 done under run1/; p1's outputs live under sibling runs -> not done
@@ -99,7 +99,7 @@ def test_compute_resume_false_reprocesses(bucket: FakeBucket, tmp_path):
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".md")
         .compute(resume=False, prefetch=0, dir=tmp_path)
     )
     assert (stats.processed, stats.skipped) == (1, 0)
@@ -120,7 +120,7 @@ def test_setup_runs_once_and_ctx_is_passed(bucket: FakeBucket, tmp_path):
     stats = (
         Bag.from_bucket("ns/src")
         .map_batches(fn, batch_size=1, setup=load_model)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".out")
         .compute(prefetch=0, dir=tmp_path)
     )
     assert stats.batches == 4
@@ -132,7 +132,7 @@ def test_take_returns_outputs_and_writes_nothing(bucket: FakeBucket, tmp_path):
     out = (
         Bag.from_bucket("ns/src")
         .map_batches(_upper_md, batch_size=5)
-        .to_bucket("ns/out")
+        .to_bucket("ns/out", done=".md")
         .take(3, dir=tmp_path)
     )
     assert [k for k, _ in out] == ["f0.bin.md", "f1.bin.md", "f2.bin.md"]

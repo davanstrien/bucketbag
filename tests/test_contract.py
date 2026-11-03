@@ -1,19 +1,21 @@
 """The contract in CONTRACT.md, one test per rule, through public entry points only.
 
-Tests marked ``known_gap`` check a rule that today's code breaks. Each fails with ``KnownGap``
-(strict xfail) until its fix lands; the fix removes the marker.
+A rule that the code breaks gets a test marked ``known_gap`` (see conftest.py): a strict xfail
+that only ``KnownGap`` satisfies, so the fix has to remove the marker. None is open today.
 """
 
 from __future__ import annotations
 
 import logging
+import signal
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from conftest import count_bb_dirs, gap, known_gap
+from conftest import count_bb_dirs
 from fake_bucket import FakeBucket, FaultInjected
 
 import bucketbag
@@ -31,7 +33,9 @@ def upper_md(items: list[LoadedItem]) -> list[Output]:
 
 
 def bag(batch_size: int = 2) -> Bag:
-    return Bag.from_bucket(SRC).map_batches(upper_md, batch_size=batch_size).to_bucket(OUT)
+    return (
+        Bag.from_bucket(SRC).map_batches(upper_md, batch_size=batch_size).to_bucket(OUT, done=".md")
+    )
 
 
 def out_keys(bucket: FakeBucket) -> list[str]:
@@ -55,18 +59,20 @@ def test_prefix_without_slash_also_matches_siblings(tree: FakeBucket) -> None:
     assert list(iter_keys("ns/b", prefix="a/b")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
 
 
-@known_gap("_parse_bucket drops the trailing slash of a prefix inside the bucket reference")
 def test_trailing_slash_inside_bucket_reference_is_one_directory(tree: FakeBucket) -> None:
-    keys = list(iter_keys("hf://buckets/ns/b/a/b/"))
-    if keys != ["a/b/x.jp2", "a/b/y.jp2"]:
-        gap(f"'hf://buckets/ns/b/a/b/' listed {keys}")
+    assert list(iter_keys("hf://buckets/ns/b/a/b/")) == ["a/b/x.jp2", "a/b/y.jp2"]
+    assert list(iter_keys("ns/b/a/b/")) == ["a/b/x.jp2", "a/b/y.jp2"]
 
 
-@known_gap("a Hub web URL is parsed as bucket 'https:/'")
 def test_web_url_is_a_bucket_reference(tree: FakeBucket) -> None:
     keys = list(iter_keys("https://huggingface.co/buckets/ns/b/tree/a/b/"))
-    if keys != ["a/b/x.jp2", "a/b/y.jp2"]:
-        gap(f"the web URL listed {keys}")
+    assert keys == ["a/b/x.jp2", "a/b/y.jp2"]
+
+
+def test_prefix_joins_below_the_prefix_in_the_reference(tree: FakeBucket) -> None:
+    # "ns/b/a" with prefix="b/" lists a/b/ only: the two prefixes join as directories.
+    assert list(iter_keys("ns/b/a", prefix="b/")) == ["a/b/x.jp2", "a/b/y.jp2"]
+    assert list(iter_keys("ns/b/a/", prefix="")) == ["a/b/x.jp2", "a/b/y.jp2", "a/bc/z.jp2"]
 
 
 def test_globs_match_the_whole_key_from_the_bucket_root(tree: FakeBucket) -> None:
@@ -105,6 +111,53 @@ def test_folder_entries_are_skipped(tree: FakeBucket) -> None:
 # --- 2. Temporary files: tests/test_batched_files.py covers each prefetch level -----------
 
 
+@pytest.mark.parametrize("prefetch", [0, 1, 2, 3])
+def test_at_most_prefetch_plus_one_batches_are_on_disk(
+    bucket: FakeBucket, tmp_path: Path, prefetch: int
+) -> None:
+    files = bucket.seed(SRC, [f"pages/p{i:02d}.jp2" for i in range(10)])
+    for _ in batched_files(SRC, keys=files, n=1, prefetch=prefetch, dir=tmp_path):
+        time.sleep(0.02)  # hold the batch, so downloads ahead start while it is on disk
+    # The fake counts batch dirs as each download starts, so a peak between yields counts too.
+    assert max(bucket.dirs_at_download) <= prefetch + 1
+    if prefetch:
+        assert max(bucket.dirs_at_download) >= 2  # the lookahead does download ahead
+
+
+def test_a_worker_error_does_not_stop_the_cleanup(bucket: FakeBucket, tmp_path: Path) -> None:
+    files = bucket.seed(SRC, PAGES)
+    bucket.fail_download_on.add(2)
+    bucket.download_error = SystemExit  # a BaseException stored in a queued download
+    batches = batched_files(SRC, keys=files, n=1, prefetch=3, dir=tmp_path)
+    next(batches)
+    time.sleep(0.05)  # let the queued downloads finish
+    batches.close()
+    assert count_bb_dirs(tmp_path) == 0
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
+@pytest.mark.parametrize("prefetch", [0, 1, 2])
+def test_ctrl_c_while_waiting_leaves_no_files(
+    bucket: FakeBucket, tmp_path: Path, prefetch: int
+) -> None:
+    files = bucket.seed(SRC, PAGES)
+    bucket.download_seconds = 0.3
+    batches = batched_files(SRC, keys=files, n=1, prefetch=prefetch, dir=tmp_path)
+
+    def interrupt(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 0.05)  # fires while next() waits for the download
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            next(batches)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert count_bb_dirs(tmp_path) == 0
+
+
 def test_a_kept_generator_deletes_its_files_on_close(bucket: FakeBucket, tmp_path: Path) -> None:
     files = bucket.seed(SRC, PAGES)
     batches = batched_files(SRC, keys=files, n=1, prefetch=2, dir=tmp_path)
@@ -115,6 +168,29 @@ def test_a_kept_generator_deletes_its_files_on_close(bucket: FakeBucket, tmp_pat
 
 
 # --- 3. Resume ----------------------------------------------------------------------------
+
+
+def test_resume_needs_a_done_suffix(bucket: FakeBucket, tmp_path: Path) -> None:
+    bucket.seed(SRC, PAGES[:1])
+    run = Bag.from_bucket(SRC).map_batches(upper_md).to_bucket(OUT)
+    with pytest.raises(ValueError, match="done="):
+        run.compute(prefetch=0, dir=tmp_path)
+    assert bucket.calls["list"] == 0
+    assert run.compute(resume=False, prefetch=0, dir=tmp_path).processed == 1
+
+
+def test_an_input_is_done_only_by_its_own_output(bucket: FakeBucket, tmp_path: Path) -> None:
+    # pages/p10.md must not mark pages/p1 done, even when limit= hides pages/p10 from the plan.
+    bucket.seed(SRC, ["pages/p1", "pages/p10"])
+    bucket.seed(OUT, ["pages/p10.md"])
+    for plan in (Bag.from_bucket(SRC), Bag.from_bucket(SRC, limit=1)):
+        stats = (
+            plan.map_batches(upper_md)
+            .to_bucket(OUT, done=".md")
+            .compute(resume=True, prefetch=0, dir=tmp_path)
+        )
+        assert stats.processed == 1
+        bucket.store[OUT].pop("pages/p1.md")  # undo the write for the next plan
 
 
 def test_rerun_of_a_finished_run_processes_nothing(bucket: FakeBucket, tmp_path: Path) -> None:
@@ -128,20 +204,22 @@ def test_rerun_of_a_finished_run_processes_nothing(bucket: FakeBucket, tmp_path:
 
 def test_output_under_a_run_prefix_marks_its_input_done(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.seed(SRC, PAGES, b"page")
-    run = Bag.from_bucket(SRC).map_batches(upper_md).to_bucket(f"{OUT}/run1")
+    run = Bag.from_bucket(SRC).map_batches(upper_md).to_bucket(f"{OUT}/run1", done=".md")
     run.compute(prefetch=0, dir=tmp_path)
     assert run.compute(prefetch=0, dir=tmp_path).processed == 0
 
 
 @pytest.mark.parametrize("entry", ["take", "compute"])
-def test_output_key_without_the_input_key_is_reported_once(
+def test_an_input_without_its_done_output_is_reported_once(
     bucket: FakeBucket, tmp_path: Path, caplog: pytest.LogCaptureFixture, entry: str
 ) -> None:
     def replace_extension(items: list[LoadedItem]) -> list[Output]:
         return [(it.key.removesuffix(".jp2") + ".md", b"text") for it in items]
 
     bucket.seed(SRC, PAGES[:4])
-    run = Bag.from_bucket(SRC).map_batches(replace_extension, batch_size=2).to_bucket(OUT)
+    run = (
+        Bag.from_bucket(SRC).map_batches(replace_extension, batch_size=2).to_bucket(OUT, done=".md")
+    )
     with caplog.at_level(logging.WARNING, logger="bucketbag"):
         if entry == "take":
             run.take(4, dir=tmp_path)
@@ -149,7 +227,7 @@ def test_output_key_without_the_input_key_is_reported_once(
             run.compute(prefetch=0, dir=tmp_path)
     warnings = [record for record in caplog.records if "resume" in record.getMessage()]
     assert len(warnings) == 1  # two batches, one warning
-    assert "pages/p0.md" in warnings[0].getMessage()
+    assert "pages/p0.jp2" in warnings[0].getMessage()
 
 
 # --- 4. Failures --------------------------------------------------------------------------
@@ -187,11 +265,33 @@ def assert_rerun_finishes_the_rest(bucket: FakeBucket, tmp_path: Path, done_befo
     assert len(written) == len(set(written)), "an output was written twice"
 
 
+@pytest.mark.parametrize("entry", ["take", "compute"])
+def test_a_kept_exception_does_not_keep_temp_files(
+    bucket: FakeBucket, tmp_path: Path, entry: str
+) -> None:
+    bucket.seed(SRC, PAGES)
+    failing = (
+        Bag.from_bucket(SRC).map_batches(fail_on_batch(2), batch_size=2).to_bucket(OUT, done=".md")
+    )
+    kept: list[BaseException] = []  # a notebook or a retry loop keeps the error and its traceback
+    try:
+        if entry == "take":
+            failing.take(6, dir=tmp_path)
+        else:
+            failing.compute(prefetch=2, dir=tmp_path)
+    except Boom as error:
+        kept.append(error)
+    assert kept
+    assert count_bb_dirs(tmp_path) == 0
+
+
 def test_map_function_error_raises_and_keeps_earlier_outputs(
     bucket: FakeBucket, tmp_path: Path
 ) -> None:
     bucket.seed(SRC, PAGES)
-    failing = Bag.from_bucket(SRC).map_batches(fail_on_batch(2), batch_size=2).to_bucket(OUT)
+    failing = (
+        Bag.from_bucket(SRC).map_batches(fail_on_batch(2), batch_size=2).to_bucket(OUT, done=".md")
+    )
     run_expecting(Boom, failing, tmp_path)
     assert out_keys(bucket) == ["pages/p0.jp2.md", "pages/p1.jp2.md"]
     assert_rerun_finishes_the_rest(bucket, tmp_path, done_before=2)
@@ -255,7 +355,11 @@ def test_bag_bounds_each_batch_by_bytes(bucket: FakeBucket, tmp_path: Path) -> N
         seen.append([it.key.removeprefix("pages/") for it in items])
         return upper_md(items)
 
-    run = Bag.from_bucket(SRC).map_batches(record, batch_size=None, max_bytes=6).to_bucket(OUT)
+    run = (
+        Bag.from_bucket(SRC)
+        .map_batches(record, batch_size=None, max_bytes=6)
+        .to_bucket(OUT, done=".md")
+    )
     # 3+3 fits in 6 bytes; the 9-byte file is larger than the bound, so it is a batch alone.
     expected = [["p0.jp2", "p1.jp2"], ["p2.jp2"], ["p3.jp2"], ["p4.jp2"]]
     run.take(5, dir=tmp_path)
@@ -267,7 +371,7 @@ def test_bag_bounds_each_batch_by_bytes(bucket: FakeBucket, tmp_path: Path) -> N
 
 def test_token_reaches_every_hub_call(bucket: FakeBucket, tmp_path: Path) -> None:
     bucket.seed(SRC, PAGES[:2])
-    run = Bag.from_bucket(SRC, token="hf_test").map_batches(upper_md).to_bucket(OUT)
+    run = Bag.from_bucket(SRC, token="hf_test").map_batches(upper_md).to_bucket(OUT, done=".md")
     run.compute(prefetch=0, dir=tmp_path)
     assert {name for name, _ in bucket.tokens} == {
         "list_bucket_tree",
@@ -327,7 +431,7 @@ def test_negative_prefetch_is_refused_before_listing_or_setup(
     def fn(items: list[LoadedItem], ctx: None) -> list[Output]:
         return upper_md(items)
 
-    run = Bag.from_bucket(SRC).map_batches(fn, setup=load_model).to_bucket(OUT)
+    run = Bag.from_bucket(SRC).map_batches(fn, setup=load_model).to_bucket(OUT, done=".md")
     with pytest.raises(ValueError, match="prefetch"):
         next(batched_files(SRC, prefetch=-1, dir=tmp_path))
     with pytest.raises(ValueError, match="prefetch"):
@@ -340,7 +444,9 @@ def test_map_function_with_keyword_only_options(bucket: FakeBucket, tmp_path: Pa
         return [(it.key + suffix, b"x") for it in items]
 
     bucket.seed(SRC, PAGES[:1])
-    Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT).compute(prefetch=0, dir=tmp_path)
+    Bag.from_bucket(SRC).map_batches(fn).to_bucket(OUT, done=".md").compute(
+        prefetch=0, dir=tmp_path
+    )
     assert bucket.keys(OUT) == ["pages/p0.jp2.md"]
 
 
