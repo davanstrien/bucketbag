@@ -123,7 +123,7 @@ class Bag:
     fn: MapFn | None = None
     setup: Callable[[], Any] | None = None
     batch_size: int | None = 32
-    max_bytes: int | None = None
+    max_bytes: float | None = None
     out: str | None = None
 
     # -- constructors / transforms (each returns a NEW Bag) --------------------
@@ -146,7 +146,7 @@ class Bag:
         fn: Callable[[list[LoadedItem]], Iterable[Output]],
         *,
         batch_size: int | None = 32,
-        max_bytes: int | None = None,
+        max_bytes: float | None = None,
         setup: None = None,
     ) -> Bag: ...
 
@@ -156,7 +156,7 @@ class Bag:
         fn: Callable[[list[LoadedItem], C], Iterable[Output]],
         *,
         batch_size: int | None = 32,
-        max_bytes: int | None = None,
+        max_bytes: float | None = None,
         setup: Callable[[], C],
     ) -> Bag: ...
 
@@ -165,7 +165,7 @@ class Bag:
         fn: MapFn,
         *,
         batch_size: int | None = 32,
-        max_bytes: int | None = None,
+        max_bytes: float | None = None,
         setup: Callable[[], Any] | None = None,
     ) -> Bag:
         """Set the per-batch function: ``fn(items) -> iterable[(key, bytes|str)]``.

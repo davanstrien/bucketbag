@@ -291,14 +291,28 @@ def test_unworkable_batch_bounds_are_refused_before_listing(
 
 @pytest.mark.parametrize(
     ("n", "max_bytes", "prefetch"),
-    [(True, None, 2), (2.5, None, 2), (None, float("nan"), 2), (4, None, 1.5)],
+    [
+        (True, None, 2),
+        (2.5, None, 2),
+        (None, float("nan"), 2),
+        (None, float("inf"), 2),
+        (None, True, 2),
+        (4, None, 1.5),
+        (4, None, None),
+    ],
 )
-def test_batch_settings_must_be_whole_numbers(
+def test_batch_settings_of_the_wrong_kind_are_refused(
     bucket: FakeBucket, tmp_path: Path, n: Any, max_bytes: Any, prefetch: Any
 ) -> None:
-    with pytest.raises(TypeError, match="whole number"):
+    with pytest.raises(TypeError, match="whole number|finite number"):
         next(batched_files(SRC, n=n, max_bytes=max_bytes, prefetch=prefetch, dir=tmp_path))
     assert bucket.calls["list"] == 0
+
+
+def test_a_float_byte_cap_works(bucket: FakeBucket, tmp_path: Path) -> None:
+    files = bucket.seed(SRC, PAGES)  # 4 bytes each
+    batches = list(batched_files(SRC, keys=files, n=None, max_bytes=8e0, prefetch=0, dir=tmp_path))
+    assert [len(batch) for batch in batches] == [2, 2, 2]
 
 
 def test_negative_prefetch_is_refused_before_listing_or_setup(

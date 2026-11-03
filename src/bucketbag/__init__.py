@@ -27,6 +27,7 @@ from __future__ import annotations
 import builtins
 import json as _json
 import logging
+import math
 import numbers
 import os
 import re
@@ -361,14 +362,30 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
-def _check_batch_settings(n: int | None, max_bytes: int | None, prefetch: int = 0) -> None:
+def _is_count(value: object) -> bool:
+    """A whole number that is not a bool (Python counts ``True`` as 1)."""
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+
+
+def _is_byte_cap(value: object) -> bool:
+    """A finite real number that is not a bool. ``4e9`` is fine.
+
+    nan and inf compare False with every running total, so ``_pack`` would never split by
+    bytes and one batch would hold every file.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return False
+    return math.isfinite(value)
+
+
+def _check_batch_settings(n: int | None, max_bytes: float | None, prefetch: int = 0) -> None:
     """Refuse batch settings that cannot work, before anything is listed or downloaded."""
-    for name, value in (("n", n), ("max_bytes", max_bytes), ("prefetch", prefetch)):
-        # A bool is an int to Python, and a float such as nan compares False with everything.
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, numbers.Integral)
-        ):
-            raise TypeError(f"{name} must be a whole number, got {value!r}.")
+    if n is not None and not _is_count(n):
+        raise TypeError(f"n must be a whole number or None, got {n!r}.")
+    if max_bytes is not None and not _is_byte_cap(max_bytes):
+        raise TypeError(f"max_bytes must be a finite number or None, got {max_bytes!r}.")
+    if not _is_count(prefetch):
+        raise TypeError(f"prefetch must be a whole number, got {prefetch!r}.")
     if n is None and max_bytes is None:
         raise ValueError(
             "Batches need a bound: set the file count (n / batch_size), max_bytes, or both. "
@@ -383,7 +400,7 @@ def _check_batch_settings(n: int | None, max_bytes: int | None, prefetch: int = 
 
 
 def _pack(
-    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: int | None
+    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: float | None
 ) -> Iterator[list[BucketFile | str]]:
     """Group files into batches capped by count (``n``) and/or total bytes (``max_bytes``).
 
@@ -413,7 +430,7 @@ def batched_files(
     include: str | None = None,
     exclude: str | None = None,
     n: int | None = 20,
-    max_bytes: int | None = None,
+    max_bytes: float | None = None,
     dir: str | os.PathLike[str] | None = None,
     prefetch: int = 2,
     max_workers: int | None = None,
