@@ -46,6 +46,15 @@ def known_gap(reason: str) -> pytest.MarkDecorator:
     return pytest.mark.xfail(raises=KnownGap, strict=True, reason=reason)
 
 
+@pytest.fixture(autouse=True)
+def one_file_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Download each file with its own hub call, so the fake's per-call counters and faults
+    line up with files. By default bucketbag packs small files ~64 MB to a call, so these tiny
+    test files would all share one call; tests of that grouping set ``_CALL_FILES`` back.
+    """
+    monkeypatch.setattr("bucketbag._hub._CALL_FILES", 1)
+
+
 @pytest.fixture
 def bucket(monkeypatch: pytest.MonkeyPatch) -> FakeBucket:
     """An empty in-memory Hub (see ``fake_bucket.py``), installed for this test."""

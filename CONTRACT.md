@@ -31,15 +31,21 @@ the code breaks; its test is a strict xfail until the fix lands. No gap is open.
 the loop body raises, when the caller stops early, and for batches downloaded ahead
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
-At most `prefetch + 1` batches are on disk at once: the one you are processing and `prefetch`
-downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
+Files are downloaded in hub calls grouped by size, not by batch: a call fetches about 64 MB (at
+most 256 files), and a larger file gets a call of its own. With string keys (no sizes) a call is
+one batch. Batches are cut from the downloaded files in key order, so a batch can span calls and
+a call can hold several batches (`tests/test_download_calls.py`).
+
+At most `prefetch + 1` download calls are on disk at once: the ones holding the batch you are
+processing and the ones downloading ahead. A batch that spans more calls than that is the one
+exception. `prefetch` is also the number of download threads (at least one). Downloads
 always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
 A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
 stay on disk.
 
 "Stops early" means the generator is closed. A `for` loop over `batched_files(...)` closes it
 when the loop ends. A caller that keeps the generator in a variable must call `.close()`
-(or use `contextlib.closing`); until then the current and lookahead batches stay on disk.
+(or use `contextlib.closing`); until then the current and lookahead downloads stay on disk.
 
 ## 3. Resume (`Bag`)
 
@@ -104,8 +110,8 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   total, the rate, the time left and the split. A long batch delays its line. All go to the `bucketbag` logger at INFO, and print to stderr as
   `[bucketbag] …` lines until the caller configures logging; then the caller's handlers get
   them.
-- `batched_files` warns before the first download when the largest `prefetch + 1` batches
-  would not fit in the scratch dir's free space. String keys carry no size, so they never warn.
+- `batched_files` warns before the first download when the largest `prefetch + 1` download
+  calls would not fit in the scratch dir's free space. String keys carry no size, so they never warn.
 
 ## 7. Process-wide xet settings
 

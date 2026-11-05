@@ -112,7 +112,7 @@ def test_folder_entries_are_skipped(tree: FakeBucket) -> None:
 
 
 @pytest.mark.parametrize("prefetch", [0, 1, 2, 3])
-def test_at_most_prefetch_plus_one_batches_are_on_disk(
+def test_at_most_prefetch_plus_one_download_calls_are_on_disk(
     bucket: FakeBucket, tmp_path: Path, prefetch: int
 ) -> None:
     files = bucket.seed(SRC, [f"pages/p{i:02d}.jp2" for i in range(10)])
@@ -304,7 +304,7 @@ def test_download_error_raises_and_keeps_earlier_outputs(
     bucket: FakeBucket, tmp_path: Path
 ) -> None:
     bucket.seed(SRC, PAGES)
-    bucket.fail_download_on.add(3)  # without prefetch, download call 3 is batch 3
+    bucket.fail_download_on.add(5)  # one file per call, prefetch=0: call 5 opens batch 3
     run_expecting(FaultInjected, bag(), tmp_path, prefetch=0)
     bucket.fail_download_on.clear()
     assert len(out_keys(bucket)) == 4
@@ -591,12 +591,12 @@ def test_a_too_small_scratch_dir_is_reported(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    files = bucket.seed(SRC, PAGES)  # 4 bytes each; with n=2 and prefetch=2, up to 24 on disk
+    files = bucket.seed(SRC, PAGES)  # 4 bytes each, one per call; prefetch=2: 3 calls, 12 bytes
 
     def disk_with(free: int) -> Callable[[object], SimpleNamespace]:
         return lambda path: SimpleNamespace(total=free, used=0, free=free)
 
-    for free, warns in ((23, True), (24, False)):
+    for free, warns in ((11, True), (12, False)):
         monkeypatch.setattr(bucketbag._hub.shutil, "disk_usage", disk_with(free))
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="bucketbag"):

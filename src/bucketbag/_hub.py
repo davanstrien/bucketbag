@@ -15,7 +15,7 @@ import os
 import shutil
 import tempfile
 from collections import deque
-from collections.abc import Generator, Iterable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -218,24 +218,36 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
+# Bytes and files per download call. Every download_bucket_files call costs about 0.4 s before
+# data moves (a metadata request and a new xet download group, which fetches a CAS token), so
+# small files go many to a call. A file larger than _CALL_BYTES gets a call of its own, so large
+# files download in parallel. The file cap keeps the first batch of tiny files from waiting on
+# thousands of downloads.
+_CALL_BYTES = 64_000_000
+_CALL_FILES = 256
+
+
 @dataclass(frozen=True)
-class _Batch:
-    """One downloaded batch: the temp dir that holds its files, and its items."""
+class _Call:
+    """One finished download call: its temp dir, and one entry per requested file.
+
+    ``items[i]`` is ``None`` when the i-th requested file was missing at download time.
+    """
 
     tmpdir: Path
-    items: list[LoadedItem]
+    items: list[LoadedItem | None]
 
 
-def _download_batch(
+def _download_call(
     api: HfApi,
     bucket_id: str,
     chunk: list[BucketFile | str],
     base_dir: Path,
     token: str | bool | None,
-) -> _Batch:
-    """Download ``chunk`` into a new temp dir under ``base_dir``.
+) -> _Call:
+    """Download ``chunk`` with one hub call into a new temp dir under ``base_dir``.
 
-    The caller owns the returned ``_Batch.tmpdir``. If the download fails, the dir is already gone.
+    The caller owns the returned ``_Call.tmpdir``. If the download fails, the dir is already gone.
     """
     tmpdir = Path(tempfile.mkdtemp(dir=base_dir, prefix="bb-"))
     files: list[tuple[str | BucketFile, str | Path]] = []
@@ -250,28 +262,37 @@ def _download_batch(
     except BaseException:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise
-    present = [it for it in items if it.path.exists()]
-    if len(present) != len(items):
-        logger.warning("Skipped %d missing file(s) in batch", len(items) - len(present))
-    return _Batch(tmpdir, present)
+    present: list[LoadedItem | None] = [it if it.path.exists() else None for it in items]
+    missing = present.count(None)
+    if missing:
+        logger.warning("Skipped %d missing file(s) in batch", missing)
+    return _Call(tmpdir, present)
+
+
+def _download_calls(
+    remotes: Sequence[BucketFile | str], n: int | None, max_bytes: float | None
+) -> Iterator[list[BucketFile | str]]:
+    """Group files into download calls: by bytes when sizes are known, else one per batch."""
+    if all(isinstance(r, BucketFile) for r in remotes):
+        return _pack(remotes, _CALL_FILES, _CALL_BYTES)
+    return _pack(remotes, n, max_bytes)
 
 
 def _warn_if_scratch_is_small(
-    chunks: Iterable[list[BucketFile | str]], prefetch: int, base_dir: Path
+    calls: Iterable[list[BucketFile | str]], prefetch: int, base_dir: Path
 ) -> None:
-    """Warn when the largest batches that can be on disk at once exceed the free space.
+    """Warn when the largest download calls that can be on disk at once exceed the free space.
 
-    One streaming pass that keeps only the ``prefetch + 1`` largest batch sizes. Only sized
-    keys count, so string keys never warn.
+    One streaming pass that keeps only the ``prefetch + 1`` largest call sizes. Only sized keys
+    count, so string keys never warn.
     """
-    sizes = (sum(getattr(r, "size", 0) or 0 for r in chunk) for chunk in chunks)
+    sizes = (sum(getattr(r, "size", 0) or 0 for r in call) for call in calls)
     peak = sum(heapq.nlargest(prefetch + 1, sizes))
     free = shutil.disk_usage(base_dir).free
     if peak > free:
         logger.warning(
-            "Up to %.2f GB of batches can be on %s at once (prefetch + 1 = %d batches), but "
-            "only %.2f GB is free. Lower max_bytes (n or batch_size) or prefetch, or pass dir= "
-            "on a larger disk. "
+            "Up to %.2f GB of downloads can be on %s at once (prefetch + 1 = %d download "
+            "calls), but only %.2f GB is free. Lower prefetch, or pass dir= on a larger disk. "
             "/dev/shm is RAM, so running out there kills the process.",
             peak / 1e9,
             base_dir,
@@ -280,8 +301,8 @@ def _warn_if_scratch_is_small(
         )
 
 
-def _drain(ahead: deque[Future[_Batch]]) -> None:
-    """Delete every queued batch: cancel downloads not started, then wait for the rest.
+def _drain(ahead: deque[Future[_Call]]) -> None:
+    """Delete every queued call: cancel downloads not started, then wait for the rest.
 
     Cancelling first means no queued download starts while we wait. ``exception()`` waits
     without raising a worker's error (a failed download already removed its own dir), so a
@@ -310,17 +331,23 @@ def batched_files(
 ) -> Generator[list[LoadedItem], None, None]:
     """``partition_all`` for bucket files: download each batch, yield it, delete it.
 
-    Lists the bucket (or uses ``keys=``), then downloads files in batches to ``dir`` (default
-    ``/dev/shm`` if available, else the system temp) and yields ``list[LoadedItem]``.
+    Lists the bucket (or uses ``keys=``), then downloads files to ``dir`` (default ``/dev/shm``
+    if available, else the system temp) and yields ``list[LoadedItem]`` batches in key order.
 
-    Each batch's temp dir has one owner: the download worker until it returns, then this
-    generator, which deletes it when the loop moves past the batch. Batches queued ahead are
-    deleted too when the loop body raises or the generator is closed. A ``for`` loop closes it
-    when the loop ends; a caller that keeps the generator in a variable must call ``.close()``.
+    Downloads are grouped by size, not by batch: each hub call fetches about 64 MB (at most 256
+    files; a larger file gets a call of its own), because every call has a fixed cost. Batches
+    of ``n`` files / ``max_bytes`` are cut from the downloaded files. String keys carry no size,
+    so with string keys each batch is one call.
 
-    Batch size is capped by **file count** (``n``) and/or **total bytes** (``max_bytes``),
-    whichever is hit first. At most ``prefetch + 1`` batches are on disk at once, so scratch
-    high-water is about ``(prefetch + 1) * max_bytes``. NB the default scratch dir is
+    Each call's temp dir has one owner: the download worker until it returns, then this
+    generator, which deletes a batch's files when the loop moves past it and the dir once all
+    its files are used. Calls downloaded ahead are deleted too when the loop body raises or the
+    generator is closed. A ``for`` loop closes it when the loop ends; a caller that keeps the
+    generator in a variable must call ``.close()``.
+
+    ``prefetch`` download calls run ahead of the batch you are processing, so at most about
+    ``prefetch + 1`` calls are on disk at once: ``(prefetch + 1) * 64 MB`` for small files, or
+    ``prefetch + 1`` files for files larger than that. NB the default scratch dir is
     ``/dev/shm`` — **RAM tmpfs, not disk** — so size that budget against available memory, or
     pass ``dir=`` to use real disk. ``max_bytes`` needs file sizes, which bucketbag has when it
     lists for you (or when you pass ``BucketFile`` objects as ``keys``, e.g. from
@@ -340,8 +367,8 @@ def batched_files(
         max_bytes: max total bytes per batch (any finite number). A single file larger than
             this forms its own batch.
         dir: download directory (RAM tmpfs by default).
-        prefetch: how many batches download ahead of the one you are processing (``0`` =
-            sequential). It is also the number of download threads (at least one).
+        prefetch: how many download calls run ahead of the batch you are processing (``0`` =
+            one call at a time). It is also the number of download threads (at least one).
         token: HF token (defaults to the logged-in token).
 
     Yields:
@@ -374,37 +401,105 @@ def batched_files(
     api = HfApi(token=token)
     base_dir = _resolve_dir(dir)
     if any(isinstance(r, BucketFile) for r in remotes):  # only sized keys can warn
-        _warn_if_scratch_is_small(_pack(remotes, n, max_bytes), prefetch, base_dir)
-    chunks = _pack(remotes, n, max_bytes)
+        _warn_if_scratch_is_small(_download_calls(remotes, n, max_bytes), prefetch, base_dir)
+    yield from _stream_batches(api, ref.bucket_id, remotes, n, max_bytes, prefetch, base_dir, token)
 
-    def fetch(chunk: list[BucketFile | str]) -> _Batch:
-        return _download_batch(api, ref.bucket_id, chunk, base_dir, token)
+
+class _CallWindow:
+    """Download calls running ahead, and finished calls whose files are not all used yet.
+
+    Calls are queued while fewer than ``prefetch + 1`` are on disk. ``take`` hands out the next
+    files in key order, waiting for calls as needed; ``release`` deletes them once their batch
+    is done, and a call's dir once all its files are.
+    """
+
+    def __init__(
+        self,
+        pool: ThreadPoolExecutor,
+        fetch: Callable[[list[BucketFile | str]], _Call],
+        calls: Iterator[list[BucketFile | str]],
+        prefetch: int,
+    ) -> None:
+        self.pool = pool
+        self.fetch = fetch
+        self.calls = calls
+        self.prefetch = prefetch
+        self.ahead: deque[Future[_Call]] = deque()  # submitted calls, in key order
+        self.held: deque[tuple[_Call, int]] = (
+            deque()
+        )  # finished calls + index after their last file
+        self.ready: deque[LoadedItem | None] = deque()  # their files not yet taken, in key order
+        self.received = 0  # files received from finished calls
+        self.used = 0  # files released
+
+    def submit(self, *, force: bool = False) -> None:
+        """Queue calls while fewer than prefetch + 1 are on disk; ``force`` queues one anyway."""
+        while force or len(self.ahead) + len(self.held) < self.prefetch + 1:
+            chunk = next(self.calls, None)
+            if chunk is None:
+                return
+            self.ahead.append(self.pool.submit(self.fetch, chunk))
+            force = False
+
+    def take(self, count: int) -> list[LoadedItem | None]:
+        """The next ``count`` files in key order (``None`` for a missing one)."""
+        while len(self.ready) < count:
+            if not self.ahead:
+                self.submit(force=True)  # the batch needs a call the disk bound held back
+            # Wait before popping: a Ctrl-C during the wait leaves the future queued, so close()
+            # still deletes its files.
+            call = self.ahead[0].result()
+            self.ahead.popleft()  # from here the window owns call.tmpdir
+            self.received += len(call.items)
+            self.held.append((call, self.received))
+            self.ready.extend(call.items)
+        return [self.ready.popleft() for _ in range(count)]
+
+    def release(self, taken: list[LoadedItem | None]) -> None:
+        """Delete the files of a finished batch, and every call dir it emptied."""
+        for item in taken:
+            if item is not None:
+                item.path.unlink(missing_ok=True)
+        self.used += len(taken)
+        while self.held and self.held[0][1] <= self.used:
+            shutil.rmtree(self.held.popleft()[0].tmpdir, ignore_errors=True)
+
+    def close(self) -> None:
+        """Delete everything still on disk or on its way."""
+        _drain(self.ahead)
+        for call, _end in self.held:
+            shutil.rmtree(call.tmpdir, ignore_errors=True)
+        self.held.clear()
+
+
+def _stream_batches(  # noqa: PLR0913 - the loop's settings, passed through from batched_files
+    api: HfApi,
+    bucket_id: str,
+    remotes: Sequence[BucketFile | str],
+    n: int | None,
+    max_bytes: float | None,
+    prefetch: int,
+    base_dir: Path,
+    token: str | bool | None,
+) -> Generator[list[LoadedItem], None, None]:
+    """Run download calls ahead on a thread pool; yield batches cut from their files in order."""
+
+    def fetch(chunk: list[BucketFile | str]) -> _Call:
+        return _download_call(api, bucket_id, chunk, base_dir, token)
 
     with ThreadPoolExecutor(max_workers=max(1, prefetch), thread_name_prefix="bb-dl") as pool:
-        ahead: deque[Future[_Batch]] = deque()
-
-        def top_up() -> None:
-            """Queue downloads until prefetch + 1 batches are on their way or none are left."""
-            while len(ahead) < prefetch + 1:
-                chunk = next(chunks, None)
-                if chunk is None:
-                    return
-                ahead.append(pool.submit(fetch, chunk))
-
+        window = _CallWindow(pool, fetch, _download_calls(remotes, n, max_bytes), prefetch)
         try:
-            top_up()
-            while ahead:
-                # Wait before popping: a Ctrl-C during the wait leaves the future queued, so
-                # _drain still deletes its files.
-                batch = ahead[0].result()
-                ahead.popleft()  # from here this generator owns batch.tmpdir
+            window.submit()
+            for batch in _pack(remotes, n, max_bytes):
+                taken = window.take(len(batch))
                 try:
-                    yield batch.items
+                    yield [item for item in taken if item is not None]
                 finally:
-                    shutil.rmtree(batch.tmpdir, ignore_errors=True)
-                top_up()
+                    window.release(taken)
+                window.submit()
         finally:
-            _drain(ahead)
+            window.close()
 
 
 # ---------------------------------------------------------------------------

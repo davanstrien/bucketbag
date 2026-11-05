@@ -4,7 +4,7 @@
 **large collections of files in [Hugging Face buckets](https://huggingface.co/docs/hub/en/storage-buckets)** — an experiment in what bucket-scale batch work
 wants as an interface:
 
-- **Bounded scratch** — download a batch, process, delete, repeat. Peak footprint ≈ `(prefetch + 1) × max_bytes`, never the corpus.
+- **Bounded scratch** — download, process, delete, repeat. Peak footprint ≈ `prefetch + 1` download calls of ~64 MB (or one large file each), never the corpus.
 - **Resume** — re-runs skip work already done (long [HF Jobs](https://huggingface.co/docs/hub/en/jobs) can stop and restart).
 - **Zero cleanup code** — temp files removed as the loop advances, even on exceptions.
 - **Throughput defaults** — prefetch overlaps download with compute; importing bucketbag raises xet's concurrent-file limit to 32 (see [Process-wide settings](#process-wide-settings)).
@@ -35,8 +35,10 @@ for batch in batched_files("ns/my-bucket", include="**/*.jp2", max_bytes=4 * 2**
     # ↑ this batch's files are deleted as the loop advances
 ```
 
-Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**) — size `(prefetch + 1) × max_bytes`
-against memory, or pass `dir=`. One rule: don't keep a `LoadedItem`/`.path` past its batch.
+Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**). bucketbag downloads in hub calls of
+about 64 MB (a larger file gets its own call) and keeps up to `prefetch + 1` calls on disk, so
+for large files size `(prefetch + 1) ×` the largest file against memory, lower `prefetch`, or pass
+`dir=`. One rule: don't keep a `LoadedItem`/`.path` past its batch.
 
 ## Writing + resume
 
