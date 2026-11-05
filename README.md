@@ -13,6 +13,45 @@ Mounting a bucket in a Job (`hf jobs run -v hf://buckets/...`) is the simplest w
 **explicit API path** for batch workloads where footprint, resume, and concurrency should be under
 your control. Not faster than the raw API (same transport), and not a framework.
 
+## When to use it
+
+bucketbag and the Jobs mount read the same buckets with the same transport. The better choice
+depends on file size and on what the loop needs.
+
+| files | bucketbag | mount, threaded | mount, 1 reader |
+| --- | --- | --- | --- |
+| 19 KB jpg | 0.90 | 0.11 | 0.03 |
+| 0.8 MB jp2 | 1.20 | 0.16 | 0.04 |
+| 2.5 MB jpg | 0.97 | 0.18 | 0.04 |
+| 45 MB flac | 0.68 | 1.38 | 0.44 |
+| 220 MB parquet | 1.02 | 0.98 | 0.71 |
+
+Throughput as a fraction of one `HfApi.download_bucket_files` call for all of a run's files, in
+the same rounds (HF Jobs `cpu-upgrade`, 2026-11-05). The threaded mount reads with 32 threads (8
+for 45 MB files, 4 for 220 MB). bucketbag ran with grouped calls and `prefetch=2`; the byte budget
+was level or faster on these sizes.
+
+**bucketbag fits when:**
+
+- Files are small (up to a few MB). Reading files one at a time pays a round trip per file;
+  bucketbag downloads many files per call.
+- The corpus is larger than the disk. Scratch stays within the download budget, and files are
+  deleted as the loop advances.
+- The run must resume after a stop. `Bag` and `completed_keys` skip inputs already done.
+
+**The mount fits when:**
+
+- Files are tens of MB or larger and you read them with a few threads.
+- A tool wants file paths and opens the files itself, or reads only part of each file.
+- You want no code changes: `hf jobs run -v hf://buckets/ns/bucket:/data ...` and read `/data`.
+
+**Neither fits when:**
+
+- You need some columns or rows of parquet files. DuckDB and Polars read `hf://` paths directly
+  and fetch only the byte ranges they need.
+- Everything fits on disk and you want it all at once. One `HfApi.download_bucket_files` call is
+  the reference in the table.
+
 ## Install
 
 ```toml
@@ -186,8 +225,11 @@ If a pipeline is slow, time the download and the decode separately before tuning
 images, `batched_files` moves 40 files in ~1 s, and decoding those 40 takes ~70 s. Three things
 to check in the decode step:
 
-- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does): 8 threads gave the
-  same speed as 1. A process pool did scale.
+- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does). On CPython 3.14,
+  8 threads decoded JPEG 2000 pages at the speed of 1, and 8 processes at 5.1×. On free-threaded
+  CPython 3.14t with Pillow 13, 8 threads reached 5.5×, the same as 8 processes, with no loss on
+  one thread. JPEG decoding already scales with threads on the standard build (5.5× with 8).
+  Measured on HF Jobs `cpu-upgrade` (8 vCPUs).
 - **Decode smaller.** Formats with resolution levels (JPEG 2000: `im.reduce`; JPEG: `im.draft()`)
   can decode at 1/4 or 1/8 the pixels for a fraction of the time — usually all a classifier needs.
 - **Check the reduced size loads.** Pillow's JPEG 2000 `reduce>=2` fails with "broken data stream"
