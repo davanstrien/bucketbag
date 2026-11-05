@@ -31,14 +31,12 @@ the code breaks; its test is a strict xfail until the fix lands. No gap is open.
 the loop body raises, when the caller stops early, and for batches downloaded ahead
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
-Files are downloaded in hub calls grouped by size, not by batch: a call fetches about 64 MB (at
-most 256 files), and a larger file gets a call of its own. With string keys (no sizes) a call is
-one batch. Batches are cut from the downloaded files in key order, so a batch can span calls and
-a call can hold several batches (`tests/test_download_calls.py`).
+Batches are downloaded in hub calls of whole batches: consecutive batches share a call until it
+holds about 64 MB or 256 files, and a batch at or above that size is a call of its own. A batch
+is never split. With string keys (no sizes) a call is one batch (`tests/test_download_calls.py`).
 
-At most `prefetch + 1` download calls are on disk at once: the ones holding the batch you are
-processing and the ones downloading ahead. A batch that spans more calls than that is the one
-exception. `prefetch` is also the number of download threads (at least one). Downloads
+At most `prefetch + 1` download calls are on disk at once: the one holding the batch you are
+processing and `prefetch` downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
 always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
 A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
 stay on disk.

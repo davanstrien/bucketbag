@@ -24,7 +24,15 @@ from typing import TYPE_CHECKING, Any, Literal, overload
 from huggingface_hub import BucketFile, HfApi
 
 from . import _xet_env
-from ._core import BucketRef, _check_batch_settings, _glob_prefix, _glob_to_re, _keeps, _pack
+from ._core import (
+    BucketRef,
+    _check_batch_settings,
+    _glob_prefix,
+    _glob_to_re,
+    _group_batches,
+    _keeps,
+    _pack,
+)
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -218,11 +226,11 @@ def iter_keys(
 # ---------------------------------------------------------------------------
 # batched_files — the headline helper
 # ---------------------------------------------------------------------------
-# Bytes and files per download call. Every download_bucket_files call costs about 0.4 s before
-# data moves (a metadata request and a new xet download group, which fetches a CAS token), so
-# small files go many to a call. A file larger than _CALL_BYTES gets a call of its own, so large
-# files download in parallel. The file cap keeps the first batch of tiny files from waiting on
-# thousands of downloads.
+# The smallest download call: consecutive batches share a call until it holds this many bytes
+# or files. Every download_bucket_files call costs about 0.4 s before data moves (a metadata
+# request and a new xet download group, which fetches a CAS token), so small batches of small
+# files spent most of their time on it. Batches at or above either size are a call each, as
+# before. The file count keeps the first batch of tiny files from waiting on thousands.
 _CALL_BYTES = 64_000_000
 _CALL_FILES = 256
 
@@ -272,10 +280,14 @@ def _download_call(
 def _download_calls(
     remotes: Sequence[BucketFile | str], n: int | None, max_bytes: float | None
 ) -> Iterator[list[BucketFile | str]]:
-    """Group files into download calls: by bytes when sizes are known, else one per batch."""
+    """Group batches into download calls: small ones together when sizes are known.
+
+    String keys carry no size, so each of their batches is one call.
+    """
+    batches = _pack(remotes, n, max_bytes)
     if all(isinstance(r, BucketFile) for r in remotes):
-        return _pack(remotes, _CALL_FILES, _CALL_BYTES)
-    return _pack(remotes, n, max_bytes)
+        return _group_batches(batches, _CALL_BYTES, _CALL_FILES)
+    return batches
 
 
 def _warn_if_scratch_is_small(
@@ -334,10 +346,9 @@ def batched_files(
     Lists the bucket (or uses ``keys=``), then downloads files to ``dir`` (default ``/dev/shm``
     if available, else the system temp) and yields ``list[LoadedItem]`` batches in key order.
 
-    Downloads are grouped by size, not by batch: each hub call fetches about 64 MB (at most 256
-    files; a larger file gets a call of its own), because every call has a fixed cost. Batches
-    of ``n`` files / ``max_bytes`` are cut from the downloaded files. String keys carry no size,
-    so with string keys each batch is one call.
+    Every hub call has a fixed cost, so small batches share one: consecutive batches go into one
+    download call until it holds about 64 MB or 256 files. A batch at or above that size is a
+    call of its own. String keys carry no size, so with string keys each batch is one call.
 
     Each call's temp dir has one owner: the download worker until it returns, then this
     generator, which deletes a batch's files when the loop moves past it and the dir once all
@@ -345,13 +356,14 @@ def batched_files(
     generator is closed. A ``for`` loop closes it when the loop ends; a caller that keeps the
     generator in a variable must call ``.close()``.
 
-    ``prefetch`` download calls run ahead of the batch you are processing, so at most about
-    ``prefetch + 1`` calls are on disk at once: ``(prefetch + 1) * 64 MB`` for small files, or
-    ``prefetch + 1`` files for files larger than that. NB the default scratch dir is
-    ``/dev/shm`` — **RAM tmpfs, not disk** — so size that budget against available memory, or
-    pass ``dir=`` to use real disk. ``max_bytes`` needs file sizes, which bucketbag has when it
-    lists for you (or when you pass ``BucketFile`` objects as ``keys``, e.g. from
-    ``iter_keys(..., objects=True)``); bare string keys with ``max_bytes`` raise ``ValueError``.
+    ``prefetch`` download calls run ahead of the batch you are processing, so at most
+    ``prefetch + 1`` calls are on disk at once: about ``(prefetch + 1) * max(64 MB, batch)``.
+    NB the default scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so size that budget
+    against available memory, or pass ``dir=`` to use real disk.
+
+    ``max_bytes`` needs file sizes, which bucketbag has when it lists for you (or when you pass
+    ``BucketFile`` objects as ``keys``, e.g. from ``iter_keys(..., objects=True)``); bare string
+    keys with ``max_bytes`` raise ``ValueError``.
 
     When the helper lists for you it keeps the ``BucketFile`` objects and passes them to
     ``download_bucket_files``, which skips the per-file metadata fetch. (Passing ``keys=`` as

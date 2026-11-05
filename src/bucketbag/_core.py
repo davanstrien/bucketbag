@@ -194,6 +194,26 @@ def _pack(
         yield batch
 
 
+def _group_batches(
+    batches: Iterable[list[BucketFile | str]], min_bytes: float, min_files: int
+) -> Iterator[list[BucketFile | str]]:
+    """Join consecutive batches into download calls of at least ``min_bytes`` or ``min_files``.
+
+    A batch is never split, so a batch at or above either size is a call of its own (as one
+    call per batch). Sizes come from ``BucketFile.size``; unknown sizes count as 0.
+    """
+    call: list[BucketFile | str] = []
+    total = 0
+    for batch in batches:
+        call += batch
+        total += sum(getattr(r, "size", 0) or 0 for r in batch)
+        if total >= min_bytes or len(call) >= min_files:
+            yield call
+            call, total = [], 0
+    if call:
+        yield call
+
+
 # ---------------------------------------------------------------------------
 # Resume (CONTRACT §3)
 # ---------------------------------------------------------------------------
