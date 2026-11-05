@@ -11,6 +11,9 @@
   Values you export win; `BUCKETBAG_NO_XET_TUNE=1` keeps xet's defaults.
 - **`boost()` can replace bucketbag's import-time values** (before, it used `setdefault`, so it
   could not change a value bucketbag had set). It still never replaces a value you exported.
+- **A larger download window.** The default budget of 2 GB keeps enough data in flight for small
+  and medium files (bucketbag 0.4.0 kept about three batches). The scratch-space warning now fires
+  only when one download call cannot fit, since the budget adapts to the free space.
 - **Small batches share a download call.** Every hub call costs about 0.4 s before data moves,
   so consecutive batches of sized keys now go into one call until it holds about 64 MB or 256
   files; a batch at or above that is a call of its own, and a batch is never split. With the
@@ -19,9 +22,13 @@
 
 ### Breaking changes and how to migrate
 
-- **`prefetch` counts download calls ahead, not batches.** Scratch holds up to `prefetch + 1`
-  calls, about `(prefetch + 1) × max(64 MB, one batch)`; with small batches that is more than
-  `(prefetch + 1)` batches. Lower `prefetch` or pass `dir=` on real disk if `/dev/shm` is tight.
+- **Downloads run ahead by bytes, not by batches: `prefetch_bytes` (default 2 GB).** The files on
+  disk and on their way stay within it, capped at half the scratch dir's free space; a batch
+  larger than the budget still downloads, on its own. On a small machine pass
+  `prefetch_bytes=256e6`, or `0` for one download call at a time. `prefetch` (now default
+  `None`) is an optional cap on the download calls ahead and sets the thread count (default 8);
+  it is the only bound for string keys (default 2). `Bag.compute` takes both. Code that passed
+  `prefetch=k` keeps a cap of `k + 1` calls on disk, now also within the byte budget.
 
 ## 0.4.0 — 2026-11-03
 

@@ -32,11 +32,17 @@ the loop body raises, when the caller stops early, and for batches downloaded ah
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
 Batches are downloaded in hub calls of whole batches: consecutive batches share a call until it
-holds about 64 MB or 256 files, and a batch at or above that size is a call of its own. A batch
+holds about `min(64 MB, prefetch_bytes / 4)` or 256 files, and a batch at or above that size is a
+call of its own. A batch
 is never split. With string keys (no sizes) a call is one batch (`tests/test_download_calls.py`).
 
-At most `prefetch + 1` download calls are on disk at once: the one holding the batch you are
-processing and `prefetch` downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
+Downloads run ahead of the batch you are processing while the bytes on disk and on their way
+stay within `prefetch_bytes` (default 2 GB), capped at half the scratch dir's free space when the
+loop starts. One call always runs when the next batch needs it, so a call larger than the budget
+downloads on its own; `prefetch_bytes=0` downloads one call at a time
+(`tests/test_prefetch_bytes.py`). `prefetch`, when set, also caps the calls on disk at
+`prefetch + 1` and sets the number of download threads (default 8). String keys carry no size,
+so only `prefetch` bounds them (default 2). Downloads
 always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
 A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
 stay on disk.
@@ -85,10 +91,11 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 - `batch_size` caps a batch's file count and `max_bytes` its total size; a single file larger
   than `max_bytes` forms its own batch. `max_bytes` with string keys raises `ValueError`:
   string keys carry no size.
-- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) and
-  `prefetch` must be whole numbers; `max_bytes` may be any finite number, such as `4e9`. A bool,
-  nan or inf raises `TypeError`. At least one of `n` and `max_bytes` must be set, each at least
-  1, and `prefetch` must be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
+- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) must
+  be a whole number and `prefetch` a whole number or `None`; `max_bytes` and `prefetch_bytes`
+  may be any finite number, such as `4e9`. A bool, nan or inf raises `TypeError`. At least one
+  of `n` and `max_bytes` must be set, each at least 1, and `prefetch` and `prefetch_bytes` must
+  be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
   the plan is built.
 - The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given. Its
   signature is not inspected.
@@ -108,8 +115,9 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   total, the rate, the time left and the split. A long batch delays its line. All go to the `bucketbag` logger at INFO, and print to stderr as
   `[bucketbag] …` lines until the caller configures logging; then the caller's handlers get
   them.
-- `batched_files` warns before the first download when the largest `prefetch + 1` download
-  calls would not fit in the scratch dir's free space. String keys carry no size, so they never warn.
+- `batched_files` warns before the first download when its largest download call would not fit
+  in the scratch dir's free space (the budget adapts, but one call always runs). String keys
+  carry no size, so they never warn.
 
 ## 7. Process-wide xet settings
 

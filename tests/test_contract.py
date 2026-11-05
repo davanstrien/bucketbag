@@ -405,7 +405,6 @@ def test_unworkable_batch_bounds_are_refused_before_listing(
         (None, float("inf"), 2),
         (None, True, 2),
         (4, None, 1.5),
-        (4, None, None),
     ],
 )
 def test_batch_settings_of_the_wrong_kind_are_refused(
@@ -585,23 +584,23 @@ def test_logs_reach_stderr_until_the_caller_configures_logging(
     assert "hello again" not in capsys.readouterr().err
 
 
-def test_a_too_small_scratch_dir_is_reported(
+def test_a_call_larger_than_the_free_space_is_reported(
     bucket: FakeBucket,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    files = bucket.seed(SRC, PAGES)  # 4 bytes each; with n=2 and prefetch=2, up to 24 on disk
+    files = bucket.seed(SRC, PAGES)  # 4 bytes each; n=4 makes one 16-byte batch, one call
 
     def disk_with(free: int) -> Callable[[object], SimpleNamespace]:
         return lambda path: SimpleNamespace(total=free, used=0, free=free)
 
-    for free, warns in ((23, True), (24, False)):
+    for free, warns in ((15, True), (16, False)):
         monkeypatch.setattr(bucketbag._hub.shutil, "disk_usage", disk_with(free))
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="bucketbag"):
-            batches = list(batched_files(SRC, keys=files, n=2, prefetch=2, dir=tmp_path))
-        assert len(batches) == 3  # the check reads the batches without using them up
+            batches = list(batched_files(SRC, keys=files, n=4, dir=tmp_path))
+        assert len(batches) == 2  # the check reads the calls without using them up
         assert any("GB is free" in r.getMessage() for r in caplog.records) is warns
 
 

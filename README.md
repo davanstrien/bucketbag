@@ -4,7 +4,7 @@
 **large collections of files in [Hugging Face buckets](https://huggingface.co/docs/hub/en/storage-buckets)** — an experiment in what bucket-scale batch work
 wants as an interface:
 
-- **Bounded scratch** — download, process, delete, repeat. Peak footprint ≈ `prefetch + 1` download calls of `max(64 MB, one batch)`, never the corpus.
+- **Bounded scratch** — download, process, delete, repeat. Peak footprint ≈ `prefetch_bytes` (default 2 GB, at most half the free space), never the corpus.
 - **Resume** — re-runs skip work already done (long [HF Jobs](https://huggingface.co/docs/hub/en/jobs) can stop and restart).
 - **Zero cleanup code** — temp files removed as the loop advances, even on exceptions.
 - **Throughput defaults** — prefetch overlaps download with compute; importing bucketbag raises xet's concurrent-file limit to 32 (see [Process-wide settings](#process-wide-settings)).
@@ -35,9 +35,10 @@ for batch in batched_files("ns/my-bucket", include="**/*.jp2", max_bytes=4 * 2**
     # ↑ this batch's files are deleted as the loop advances
 ```
 
-Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**). Small batches share a hub call of
-about 64 MB, and up to `prefetch + 1` calls are on disk, so size `(prefetch + 1) × max(64 MB,
-max_bytes)` against memory, or pass `dir=`. One rule: don't keep a `LoadedItem`/`.path` past its batch.
+Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**). Downloads run up to `prefetch_bytes`
+ahead (default 2 GB, and at most half the scratch dir's free space), so on a small machine pass
+`prefetch_bytes=256e6` (or `0` for one download call at a time), or `dir=` on real disk. A batch
+larger than the budget still downloads, on its own. One rule: don't keep a `LoadedItem`/`.path` past its batch.
 
 ## Writing + resume
 
@@ -102,7 +103,7 @@ bag.compute()  # once more: files may have landed during the last sleep
 
 | | |
 | --- | --- |
-| `batched_files(bucket, *, keys, include, exclude, n=20, max_bytes, dir, prefetch=2, ...)` | download batches → yield `list[LoadedItem]` → auto-delete |
+| `batched_files(bucket, *, keys, include, exclude, n=20, max_bytes, dir, prefetch_bytes=2e9, ...)` | download batches → yield `list[LoadedItem]` → auto-delete |
 | `iter_keys(bucket, *, prefix, include, exclude, start_after, limit, token)` | list + glob-filter + sort keys (no download) |
 | `put_files(pairs, out_bucket)` / `put_bytes` / `put_text` | write raw objects; `put_files` batches many per call |
 | `completed_keys(out_bucket, *, prefix, column="__source_key")` | done-set from parquet outputs |
