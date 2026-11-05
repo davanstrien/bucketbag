@@ -36,8 +36,8 @@ for batch in batched_files("ns/my-bucket", include="**/*.jp2", max_bytes=4 * 2**
 ```
 
 Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**). Downloads run ahead of your loop
-within a byte budget: 2 GB by default, or three batches when batches are larger than about
-670 MB, and at most half the scratch dir's free space. On a small machine pass a hard budget,
+within a byte budget: 2 GB by default, or three batches when the largest batch in the run is
+larger than about 670 MB, and at most half the scratch dir's free space. On a small machine pass a hard budget,
 `prefetch_bytes=256e6` (or `0` for one download call at a time), or `dir=` on real disk. One call
 always downloads ahead, so a batch larger than a hard budget means about two batches on disk.
 One rule: don't keep a `LoadedItem`/`.path` past its batch.

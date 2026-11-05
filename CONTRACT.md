@@ -28,8 +28,9 @@ the code breaks; its test is a strict xfail until the fix lands. No gap is open.
 ## 2. Temporary files
 
 `batched_files` deletes a batch's files when the loop moves past it. It also deletes them when
-the loop body raises, when the caller stops early, and for batches downloaded ahead
-(`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
+the loop body raises, when the caller stops early, and for batches downloaded ahead.
+`tests/test_batched_files.py` covers each `prefetch` level, and `tests/test_prefetch_bytes.py`
+the byte budget.
 
 Batches are downloaded in hub calls of whole batches: consecutive batches share a call until it
 holds about `min(64 MB, budget / 4)` or 256 files, and a batch at or above that size is a
@@ -38,8 +39,8 @@ is never split. With string keys (no sizes) a call is one batch (`tests/test_dow
 
 Downloads run ahead of the batch you are processing while the bytes on disk and on their way
 stay within a byte budget, capped at half the scratch dir's free space when the loop starts.
-The default budget is 2 GB, or three of the largest download call when that is more (the call
-in use and two ahead), and the first call logs a raised budget; `prefetch_bytes` sets a hard
+The default budget is 2 GB, or three of the largest download call in the run when that is more
+(the call in use and two ahead), and the first call logs a raised budget; `prefetch_bytes` sets a hard
 budget instead. One call always downloads ahead of the batch in use, so a batch larger than a
 hard budget still overlaps with the next (scratch then holds about two calls); `prefetch_bytes=0`
 downloads one call at a time, with no overlap
@@ -118,9 +119,11 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   total, the rate, the time left and the split. A long batch delays its line. All go to the `bucketbag` logger at INFO, and print to stderr as
   `[bucketbag] …` lines until the caller configures logging; then the caller's handlers get
   them.
-- `batched_files` warns before the first download when its largest download call would not fit
-  in the scratch dir's free space (the budget adapts, but one call always runs). String keys
-  carry no size, so they never warn.
+- `batched_files` warns before the first download when the calls on disk at once would not fit
+  in the scratch dir's free space: the largest pair of consecutive calls (the batch in use and
+  the call ahead), or the largest call with `prefetch_bytes=0` or `prefetch=0`. The budget
+  adapts to the free space, but these calls run whatever the budget. String keys carry no size,
+  so they never warn.
 
 ## 7. Process-wide xet settings
 

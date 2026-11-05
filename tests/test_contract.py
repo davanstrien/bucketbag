@@ -584,22 +584,33 @@ def test_logs_reach_stderr_until_the_caller_configures_logging(
     assert "hello again" not in capsys.readouterr().err
 
 
-def test_a_call_larger_than_the_free_space_is_reported(
+@pytest.mark.parametrize(
+    ("prefetch_bytes", "cases"),
+    [
+        (None, ((23, True), (24, False))),  # the batch in use and the call ahead: 16 + 8
+        (0, ((15, True), (16, False))),  # one call at a time: 16 bytes
+    ],
+)
+def test_calls_larger_than_the_free_space_are_reported(
     bucket: FakeBucket,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    prefetch_bytes: float | None,
+    cases: tuple[tuple[int, bool], ...],
 ) -> None:
-    files = bucket.seed(SRC, PAGES)  # 4 bytes each; n=4 makes one 16-byte batch, one call
+    files = bucket.seed(SRC, PAGES)  # 6 files of 4 bytes; n=4: calls of 16 and 8 bytes
 
     def disk_with(free: int) -> Callable[[object], SimpleNamespace]:
         return lambda path: SimpleNamespace(total=free, used=0, free=free)
 
-    for free, warns in ((15, True), (16, False)):
+    for free, warns in cases:
         monkeypatch.setattr(bucketbag._hub.shutil, "disk_usage", disk_with(free))
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="bucketbag"):
-            batches = list(batched_files(SRC, keys=files, n=4, dir=tmp_path))
+            batches = list(
+                batched_files(SRC, keys=files, n=4, prefetch_bytes=prefetch_bytes, dir=tmp_path)
+            )
         assert len(batches) == 2  # the check reads the calls without using them up
         assert any("GB is free" in r.getMessage() for r in caplog.records) is warns
 

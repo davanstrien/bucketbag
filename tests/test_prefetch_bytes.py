@@ -65,6 +65,15 @@ def test_a_zero_budget_downloads_one_call_at_a_time(bucket: FakeBucket, tmp_path
     assert max(bucket.dirs_at_download) == 1
 
 
+def test_a_zero_budget_downloads_empty_files_one_call_at_a_time(
+    bucket: FakeBucket, tmp_path: Path
+) -> None:
+    files = [bucket.put(SRC, key, data=b"") for key in KEYS]
+    batches = batched_files(SRC, keys=files, n=1, prefetch_bytes=0, dir=tmp_path)
+    assert drain_slowly(batches) == 12
+    assert max(bucket.dirs_at_download) == 1
+
+
 @pytest.mark.internals
 def test_the_budget_is_capped_at_half_the_free_space(
     bucket: FakeBucket, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

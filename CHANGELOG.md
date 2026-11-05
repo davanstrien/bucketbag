@@ -13,7 +13,8 @@
   could not change a value bucketbag had set). It still never replaces a value you exported.
 - **A larger download window.** The default budget of 2 GB keeps enough data in flight for small
   and medium files (bucketbag 0.4.0 kept about three batches). The scratch-space warning now fires
-  only when one download call cannot fit, since the budget adapts to the free space.
+  only when the call in use and the call ahead cannot fit (one call with `prefetch_bytes=0`),
+  since the budget adapts to the free space.
 - **Small batches share a download call.** Every hub call costs about 0.4 s before data moves,
   so consecutive batches of sized keys now go into one call until it holds about 64 MB or 256
   files; a batch at or above that is a call of its own, and a batch is never split. With the

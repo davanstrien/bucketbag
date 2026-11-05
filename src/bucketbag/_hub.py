@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import builtins
 import functools
+import itertools
 import json as _json
 import logging
 import os
@@ -301,23 +302,31 @@ def _download_calls(
 
 
 def _call_bytes(call: list[BucketFile | str]) -> int:
-    return sum(getattr(r, "size", 0) or 0 for r in call)
+    """The bytes a call counts against the budget. An empty file counts as 1 byte, so a run of
+    empty files cannot fit a budget (even ``0``) for free."""
+    return sum(max(getattr(r, "size", 0) or 0, 1) for r in call)
 
 
-def _warn_if_a_call_cannot_fit(calls: Iterable[list[BucketFile | str]], base_dir: Path) -> None:
-    """Warn when the largest download call is larger than the scratch dir's free space.
+def _warn_if_calls_cannot_fit(
+    calls: Iterable[list[BucketFile | str]], base_dir: Path, *, overlap: bool
+) -> None:
+    """Warn when the download calls on disk at once can need more than the free space.
 
-    The byte budget is already capped at half the free space, but one call always runs, so a
-    batch larger than the free space cannot fit. Only sized keys count.
+    The byte budget is at most half the free space, but one call always downloads ahead of the
+    batch in use (``overlap``), so the peak is the largest pair of consecutive calls. Without
+    overlap it is the largest call. Only sized keys count.
     """
-    largest = max((_call_bytes(call) for call in calls), default=0)
+    sizes = [_call_bytes(call) for call in calls]
+    pairs = [a + b for a, b in itertools.pairwise(sizes)] if overlap else []
+    peak = max(sizes + pairs, default=0)
     free = shutil.disk_usage(base_dir).free
-    if largest > free:
+    if peak > free:
         logger.warning(
-            "One download call needs %.2f GB on %s, but only %.2f GB is free. Lower max_bytes "
-            "(or n / batch_size), or pass dir= on a larger disk. /dev/shm is RAM, so running "
-            "out there kills the process.",
-            largest / 1e9,
+            "The download calls on disk at once (the batch in use and, unless "
+            "prefetch_bytes=0, the next call) need up to %.2f GB on %s, but only %.2f GB is "
+            "free. Lower max_bytes (or n / batch_size), pass prefetch_bytes=0, or pass dir= on "
+            "a larger disk. /dev/shm is RAM, so running out there kills the process.",
+            peak / 1e9,
             base_dir,
             free / 1e9,
         )
@@ -358,7 +367,7 @@ def batched_files(
     if available, else the system temp) and yields ``list[LoadedItem]`` batches in key order.
 
     Every hub call has a fixed cost, so small batches share one: consecutive batches go into one
-    download call until it holds about 64 MB (less with a small ``prefetch_bytes``) or 256 files.
+    download call until it holds about 64 MB (less with a small budget) or 256 files.
     A batch at or above that size is a call of its own. String keys carry no size, so with
     string keys each batch is one call.
 
@@ -371,7 +380,8 @@ def batched_files(
     Downloads run ahead of the batch you are processing while the files on disk and on their way
     stay within a byte budget, at most half the scratch dir's free space. By default the budget
     is 2 GB, or three of the largest download call when that is more (the call in use and two
-    ahead), so big batches keep their overlap. ``prefetch_bytes`` sets a hard budget instead: use
+    ahead), so big batches keep their overlap. It follows the largest call in the run, so one
+    very large file raises it for the whole run. ``prefetch_bytes`` sets a hard budget instead: use
     it on a small machine. One call always downloads ahead of the batch in use, so a batch larger
     than a hard budget still overlaps with the next (scratch then holds about two calls); ``0``
     downloads one call at a time, with no overlap. NB the default scratch dir is ``/dev/shm`` —
@@ -435,7 +445,9 @@ def batched_files(
     base_dir = _resolve_dir(dir)
     window = _Bounds.for_run(remotes, n, max_bytes, prefetch, prefetch_bytes, base_dir)
     if window.budget is not None:  # only sized keys can warn
-        _warn_if_a_call_cannot_fit(_download_calls(remotes, n, max_bytes, window.budget), base_dir)
+        overlap = window.budget > 0 and window.max_calls != 0
+        calls = _download_calls(remotes, n, max_bytes, window.budget)
+        _warn_if_calls_cannot_fit(calls, base_dir, overlap=overlap)
     yield from _stream_batches(api, ref.bucket_id, remotes, n, max_bytes, window, base_dir, token)
 
 
@@ -465,15 +477,24 @@ class _Bounds:
             return cls(min(prefetch_bytes, half_free), prefetch, threads)
         calls = _download_calls(remotes, n, max_bytes, _DEFAULT_BUDGET)
         largest = max((_call_bytes(call) for call in calls), default=0)
-        budget = min(max(_DEFAULT_BUDGET, _DEFAULT_CALLS * largest), half_free)
-        if budget > _DEFAULT_BUDGET:
+        three = _DEFAULT_CALLS * largest
+        budget = min(max(_DEFAULT_BUDGET, three), half_free)
+        if three > _DEFAULT_BUDGET and budget >= three:
             logger.info(
-                "Download budget: %.2f GB, room for the batch in use and two downloading "
-                "ahead (the largest download call is %.2f GB; at most half the free space on "
-                "%s). Pass prefetch_bytes= for a hard limit.",
+                "Download budget: %.2f GB, room for the batch in use and two calls ahead (the "
+                "largest download call is %.2f GB). Pass prefetch_bytes= for a hard limit.",
                 budget / 1e9,
                 largest / 1e9,
+            )
+        elif three > _DEFAULT_BUDGET:
+            logger.info(
+                "Download budget: %.2f GB, half the free space on %s; three of the largest "
+                "download call (%.2f GB) would need %.2f GB. Pass prefetch_bytes= for a hard "
+                "limit.",
+                budget / 1e9,
                 base_dir,
+                largest / 1e9,
+                three / 1e9,
             )
         return cls(budget, prefetch, threads)
 
