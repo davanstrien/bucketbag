@@ -28,18 +28,32 @@ the code breaks; its test is a strict xfail until the fix lands. No gap is open.
 ## 2. Temporary files
 
 `batched_files` deletes a batch's files when the loop moves past it. It also deletes them when
-the loop body raises, when the caller stops early, and for batches downloaded ahead
-(`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
+the loop body raises, when the caller stops early, and for batches downloaded ahead.
+`tests/test_batched_files.py` covers each `prefetch` level, and `tests/test_prefetch_bytes.py`
+the byte budget.
 
-At most `prefetch + 1` batches are on disk at once: the one you are processing and `prefetch`
-downloading ahead. `prefetch` is also the number of download threads (at least one). Downloads
+Batches are downloaded in hub calls of whole batches: consecutive batches share a call until it
+holds about `min(64 MB, budget / 4)` or 256 files, and a batch at or above that size is a
+call of its own. A batch
+is never split. With string keys (no sizes) a call is one batch (`tests/test_download_calls.py`).
+
+Downloads run ahead of the batch you are processing while the bytes on disk and on their way
+stay within a byte budget, capped at half the scratch dir's free space when the loop starts.
+The default budget is 2 GB, or three of the largest download call in the run when that is more
+(the call in use and two ahead), and the first call logs a raised budget; `prefetch_bytes` sets a hard
+budget instead. One call always downloads ahead of the batch in use, so a batch larger than a
+hard budget still overlaps with the next (scratch then holds about two calls); `prefetch_bytes=0`
+downloads one call at a time, with no overlap
+(`tests/test_prefetch_bytes.py`). `prefetch`, when set, also caps the calls on disk at
+`prefetch + 1` and sets the number of download threads (default 8). String keys carry no size,
+so only `prefetch` bounds them (default 2). Downloads
 always run in a thread, so Ctrl-C waits for the download in flight, then deletes its files.
 A second Ctrl-C during that wait stops the clean-up, and the batches still downloading may
 stay on disk.
 
 "Stops early" means the generator is closed. A `for` loop over `batched_files(...)` closes it
 when the loop ends. A caller that keeps the generator in a variable must call `.close()`
-(or use `contextlib.closing`); until then the current and lookahead batches stay on disk.
+(or use `contextlib.closing`); until then the current and lookahead downloads stay on disk.
 
 ## 3. Resume (`Bag`)
 
@@ -81,10 +95,11 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 - `batch_size` caps a batch's file count and `max_bytes` its total size; a single file larger
   than `max_bytes` forms its own batch. `max_bytes` with string keys raises `ValueError`:
   string keys carry no size.
-- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) and
-  `prefetch` must be whole numbers; `max_bytes` may be any finite number, such as `4e9`. A bool,
-  nan or inf raises `TypeError`. At least one of `n` and `max_bytes` must be set, each at least
-  1, and `prefetch` must be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
+- Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) must
+  be a whole number and `prefetch` a whole number or `None`; `max_bytes` and `prefetch_bytes`
+  may be `None` or any finite number, such as `4e9`. A bool, nan or inf raises `TypeError`. At least one
+  of `n` and `max_bytes` must be set, each at least 1, and `prefetch` and `prefetch_bytes` must
+  be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
   the plan is built.
 - The map function is called as `fn(items)`, or `fn(items, ctx)` when `setup=` is given. Its
   signature is not inspected.
@@ -104,5 +119,22 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   total, the rate, the time left and the split. A long batch delays its line. All go to the `bucketbag` logger at INFO, and print to stderr as
   `[bucketbag] …` lines until the caller configures logging; then the caller's handlers get
   them.
-- `batched_files` warns before the first download when the largest `prefetch + 1` batches
-  would not fit in the scratch dir's free space. String keys carry no size, so they never warn.
+- `batched_files` warns before the first download when the calls on disk at once would not fit
+  in the scratch dir's free space: the largest pair of consecutive calls (the batch in use and
+  the call ahead), or the largest call with `prefetch_bytes=0` or `prefetch=0`. The budget
+  adapts to the free space, but these calls run whatever the budget. String keys carry no size,
+  so they never warn.
+
+## 7. Process-wide xet settings
+
+- Importing bucketbag sets `HF_XET_HIGH_PERFORMANCE=1` and
+  `HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32`, each only when the caller has not set it.
+  `BUCKETBAG_NO_XET_TUNE=1` sets neither. Both apply to every Hugging Face download in the
+  process.
+- `boost(file_concurrency=k)` replaces bucketbag's import-time values, never values the caller
+  exported.
+- `batched_files` logs both values, and who set each, at INFO once per process, before its first
+  download. When xet had already started before bucketbag was imported (the process downloaded
+  from the Hub first), xet may keep its own values; the line then says so, at WARNING.
+
+`tests/test_xet_env.py` checks each rule.

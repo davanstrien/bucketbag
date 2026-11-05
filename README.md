@@ -4,14 +4,55 @@
 **large collections of files in [Hugging Face buckets](https://huggingface.co/docs/hub/en/storage-buckets)** — an experiment in what bucket-scale batch work
 wants as an interface:
 
-- **Bounded scratch** — download a batch, process, delete, repeat. Peak footprint ≈ `(prefetch + 1) × max_bytes`, never the corpus.
+- **Bounded scratch** — download, process, delete, repeat. Peak footprint ≈ the download budget (default 2 GB, or three batches when batches are larger; at most half the free space), never the corpus.
 - **Resume** — re-runs skip work already done (long [HF Jobs](https://huggingface.co/docs/hub/en/jobs) can stop and restart).
 - **Zero cleanup code** — temp files removed as the loop advances, even on exceptions.
-- **Throughput knobs** — prefetch overlaps download with compute; `boost()` raises xet's small-file concurrency.
+- **Throughput defaults** — prefetch overlaps download with compute; importing bucketbag raises xet's concurrent-file limit to 32 (see [Process-wide settings](#process-wide-settings)).
 
 Mounting a bucket in a Job (`hf jobs run -v hf://buckets/...`) is the simplest way to use one; bucketbag explores the
 **explicit API path** for batch workloads where footprint, resume, and concurrency should be under
 your control. Not faster than the raw API (same transport), and not a framework.
+
+## When to use it
+
+bucketbag and the Jobs mount read the same buckets with the same transport. The better choice
+depends on file size and on what the loop needs.
+
+| files | bucketbag | mount, threaded | mount, 1 reader |
+| --- | --- | --- | --- |
+| 19 KB jpg | 0.90 | 0.11 | 0.03 |
+| 0.8 MB jp2 | 1.20 | 0.16 | 0.04 |
+| 2.5 MB jpg | 0.97 | 0.18 | 0.04 |
+| 45 MB flac | 0.68 | 1.38 | 0.44 |
+| 220 MB parquet | 1.02 | 0.98 | 0.71 |
+
+Throughput as a fraction of one `HfApi.download_bucket_files` call for all of a run's files, in
+the same rounds (HF Jobs `cpu-upgrade`, 2026-11-05). The threaded mount reads with 32 threads (8
+for 45 MB files, 4 for 220 MB). bucketbag ran with grouped calls and `prefetch=2`; the byte budget
+was level or faster on the five sizes in the table. The reference is one call in the same round,
+so values above 1 are round-to-round variation: bucketbag uses the same transport.
+
+**bucketbag fits when:**
+
+- Files are small (up to a few MB). Reading files one at a time pays a round trip per file;
+  bucketbag downloads many files per call.
+- The corpus is larger than the disk. Scratch stays within the download budget, and files are
+  deleted as the loop advances.
+- The run must resume after a stop. `Bag` and `completed_keys` skip inputs already done.
+
+**The mount fits when:**
+
+- Files are tens of MB or larger and you read them with a few threads. From about 200 MB the
+  two are level.
+- A tool wants file paths and opens the files itself, or reads only part of each file.
+- You want no code changes: `hf jobs run -v hf://buckets/ns/bucket:/data ...` and read `/data`.
+
+**Neither fits when:**
+
+- You need some columns or rows of parquet files. DuckDB and Polars read `hf://` paths directly
+  and fetch only the byte ranges they need.
+- Everything fits on disk and you want it all at once. One `HfApi.download_bucket_files` call is
+  the reference in the table.
 
 ## Install
 
@@ -35,8 +76,12 @@ for batch in batched_files("ns/my-bucket", include="**/*.jp2", max_bytes=4 * 2**
     # ↑ this batch's files are deleted as the loop advances
 ```
 
-Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**) — size `(prefetch + 1) × max_bytes`
-against memory, or pass `dir=`. One rule: don't keep a `LoadedItem`/`.path` past its batch.
+Default scratch dir is `/dev/shm` (**RAM tmpfs, not disk**). Downloads run ahead of your loop
+within a byte budget: 2 GB by default, or three batches when the largest batch in the run is
+larger than about 670 MB, and at most half the scratch dir's free space. On a small machine pass a hard budget,
+`prefetch_bytes=256e6` (or `0` for one download call at a time), or `dir=` on real disk. One call
+always downloads ahead, so a batch larger than a hard budget means about two batches on disk.
+One rule: don't keep a `LoadedItem`/`.path` past its batch.
 
 ## Writing + resume
 
@@ -101,11 +146,11 @@ bag.compute()  # once more: files may have landed during the last sleep
 
 | | |
 | --- | --- |
-| `batched_files(bucket, *, keys, include, exclude, n=20, max_bytes, dir, prefetch=2, ...)` | download batches → yield `list[LoadedItem]` → auto-delete |
+| `batched_files(bucket, *, keys, include, exclude, n=20, max_bytes, dir, prefetch_bytes=None, ...)` | download batches → yield `list[LoadedItem]` → auto-delete |
 | `iter_keys(bucket, *, prefix, include, exclude, start_after, limit, token)` | list + glob-filter + sort keys (no download) |
 | `put_files(pairs, out_bucket)` / `put_bytes` / `put_text` | write raw objects; `put_files` batches many per call |
 | `completed_keys(out_bucket, *, prefix, column="__source_key")` | done-set from parquet outputs |
-| `boost(*, file_concurrency=32)` | raise xet download concurrency (~2.5× on small files) |
+| `boost(*, file_concurrency=32)` | change xet's concurrent-file limit (bucketbag sets 32 at import) |
 | `LoadedItem` | `.key` `.path` + lazy `.bytes` `.image` `.text()` `.json()` |
 | `Bag.from_bucket(...).map_batches(fn).to_bucket(out, done=".md")` + `.take(n)` / `.compute()` | the loop as a lazy plan |
 
@@ -119,18 +164,61 @@ against over-matching listings, including pagination regressions.
 
 ## Performance
 
-Cold + disjoint, replicated (`examples/bench.py`, l4x1, ~0.8 MB jp2; ±10–20%):
+HF Jobs `cpu-upgrade`, 2026-11-05: throughput as a fraction of **one** `HfApi.download_bucket_files`
+call for all of a run's files (an upper bound for bounded scratch; it holds every file on disk).
+Median of paired rounds, each version in its own process, default settings (`n=20, prefetch=2`;
+`n=2` for 45 MB, `n=4` for 0.5 GB):
 
-| | default xet | + `boost()` |
+| files | 0.4.0 | + xet limit 32 | + grouped calls |
+| --- | --- | --- | --- |
+| 19 KB jpg | 0.26 | 0.36 | **0.90** |
+| 0.8 MB jp2 | 0.30 | 0.52 | **0.90** |
+| 2.5 MB jpg | 0.33 | 0.76 | **0.96** |
+| 45 MB flac | 0.53 | 0.79 | **0.80** |
+| 0.5 GB parquet (CDN warm) | 1.20 | 1.27 | 1.21 |
+
+Two changes do it. xet allows 8 concurrent file downloads per process by default, shared by every
+call; bucketbag sets 32 at import. And every hub call costs about 0.4 s before data moves (a
+metadata request and a new xet download group), so small batches now share a call of about
+64 MB. Grouped calls alone gain nothing while xet's limit is 8. The first batch of tiny files
+waits for its whole call (about 1.5 s for 19 KB files, against 0.5 s before).
+
+This version bounds the downloads ahead by bytes, not by a count of batches, with up to 8
+download threads. Against grouped calls with `prefetch=2`, in the same rounds:
+
+| files | `prefetch=2` | byte budget (default) |
 | --- | --- | --- |
-| `bucketbag` (prefetch 2–4) | ~85–110 img/s | **~200–270 img/s** |
-| raw `download_bucket_files` | ~85–105 | ~210–260 |
-| `HfFileSystem` (32 threads) | ~90–110 | ~110 (bypasses xet) |
-| FUSE mount (same workload) | ~22 | — |
+| 19 KB jpg | 0.95 | **1.00** |
+| 0.8 MB jp2 | 0.94 | 0.95 |
+| 2.5 MB jpg | 0.86 | **1.04** |
+| 45 MB flac | 0.70 | **0.80** |
+| 220 MB parquet | 1.00 | 1.07 |
+| 0.5 GB parquet, 4 per batch (two runs) | 1.24, 0.89 | 1.08, 0.91 |
 
-Competitive with the raw API by design; the win is the interface. The one real throughput lever is
-xet's concurrent-file cap (default 8) — `boost()` raises it, ~2.5× on small files. Skip it for
-large files (over-subscription).
+A flat 2 GB budget gave 0.79 and 0.96 on the 0.5 GB rows: it kept one 2.2 GB batch ahead, where
+0.4.0 kept two. The default therefore also holds three of the largest call. With batches that
+large the first batch arrives later (about 8 s against 5 s), since three calls share the
+bandwidth; pass `prefetch=2` if that matters. A hard budget of `prefetch_bytes=256e6` gave
+0.78–1.01 on the same sizes. Raise the budget when `Bag`'s run report says downloads are the
+limit.
+
+### Process-wide settings
+
+Importing bucketbag sets two xet environment variables, unless you have set them yourself:
+`HF_XET_HIGH_PERFORMANCE=1` and `HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32`. They apply to
+**every Hugging Face download in the process**, not only bucketbag's: a model download in the same
+script also runs up to 32 files at once. xet still caps its download buffer memory (half of usable
+memory in high-performance mode, cgroup-aware). The first `batched_files` call logs the values and
+who set them:
+
+```text
+[bucketbag] xet settings for this process: HF_XET_HIGH_PERFORMANCE=1 (set by bucketbag), HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32 (set by bucketbag). ...
+```
+
+xet reads them once, when its first download starts, so **import bucketbag before the first Hugging
+Face download** in the process; otherwise the log line warns that xet may keep its own values. To
+change them, export your own values before importing bucketbag, call `boost(file_concurrency=k)`
+before the first download, or set `BUCKETBAG_NO_XET_TUNE=1` to keep xet's defaults.
 
 ### Decode, not transport
 
@@ -139,8 +227,11 @@ If a pipeline is slow, time the download and the decode separately before tuning
 images, `batched_files` moves 40 files in ~1 s, and decoding those 40 takes ~70 s. Three things
 to check in the decode step:
 
-- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does): 8 threads gave the
-  same speed as 1. A process pool did scale.
+- **Threads may not help.** Some Pillow decoders hold the GIL (JPEG 2000 does). On CPython 3.14,
+  8 threads decoded JPEG 2000 pages at the speed of 1, and 8 processes at 5.1×. On free-threaded
+  CPython 3.14t with Pillow 13, 8 threads reached 5.5×, the same as 8 processes, with no loss on
+  one thread. JPEG decoding already scales with threads on the standard build (5.5× with 8).
+  Measured on HF Jobs `cpu-upgrade` (8 vCPUs).
 - **Decode smaller.** Formats with resolution levels (JPEG 2000: `im.reduce`; JPEG: `im.draft()`)
   can decode at 1/4 or 1/8 the pixels for a fraction of the time — usually all a classifier needs.
 - **Check the reduced size loads.** Pillow's JPEG 2000 `reduce>=2` fails with "broken data stream"

@@ -27,14 +27,12 @@ every hub call and owns the temp files, ``bag`` is the lazy plan. CONTRACT.md st
 
 from __future__ import annotations
 
-import os
+from . import _xet_env
 
-# Turn on xet's high-performance mode before huggingface_hub is imported. This is the
-# documented, safe transport boost. Raising xet's per-process file-download concurrency is the
-# big lever for many small files, but it over-subscribes large ones, so it stays opt-in via
-# boost(). Opt out of even this default with BUCKETBAG_NO_XET_TUNE=1.
-if os.environ.get("BUCKETBAG_NO_XET_TUNE", "").lower() not in ("1", "true", "yes", "on"):
-    os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+# Set xet's transport defaults (high-performance mode, 32 concurrent file downloads) before
+# huggingface_hub is imported and before xet starts. Values the caller exported win;
+# BUCKETBAG_NO_XET_TUNE=1 keeps xet's own defaults. See _xet_env for the reasons.
+_xet_env.apply_defaults()
 
 from toolz import partition_all  # noqa: E402
 

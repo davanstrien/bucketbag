@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Importing bucketbag sets xet's concurrent-file limit to 32** (`HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`;
+  xet's default is 8 per process), as it already set `HF_XET_HIGH_PERFORMANCE=1`. About 2× on
+  0.8–2.5 MB files in an HF Jobs benchmark; no change on 0.5–0.7 GB files. The setting applies
+  to every Hugging Face download in the process, so the first `batched_files` call logs it.
+  Values you export win; `BUCKETBAG_NO_XET_TUNE=1` keeps xet's defaults.
+- **`boost()` can replace bucketbag's import-time values** (before, it used `setdefault`, so it
+  could not change a value bucketbag had set). It still never replaces a value you exported.
+- **A larger download window.** The default budget of 2 GB keeps enough data in flight for small
+  and medium files (bucketbag 0.4.0 kept about three batches). The scratch-space warning now fires
+  only when the call in use and the call ahead cannot fit (one call with `prefetch_bytes=0`),
+  since the budget adapts to the free space.
+- **Small batches share a download call.** Every hub call costs about 0.4 s before data moves,
+  so consecutive batches of sized keys now go into one call until it holds about 64 MB or 256
+  files; a batch at or above that is a call of its own, and a batch is never split. With the
+  xet limit above, 3–3.5× faster on 19 KB–2.5 MB files than 0.4.0 (HF Jobs benchmark); no change
+  on 0.5 GB files. String keys keep one call per batch.
+
+### Breaking changes and how to migrate
+
+- **Downloads run ahead by bytes, not by batches.** The files on disk and on their way stay
+  within a byte budget, capped at half the scratch dir's free space: 2 GB by default, or three of
+  the largest download call when that is more (the batch in use and two ahead, as 0.4.0 kept).
+  The first `batched_files` call logs a raised budget. `prefetch_bytes=` sets a hard budget
+  instead: on a small machine pass `prefetch_bytes=256e6`, or `0` for one download call at a
+  time. One call always downloads ahead, so a batch larger than a hard budget means about two
+  batches on disk. `prefetch` (now default
+  `None`) is an optional cap on the download calls ahead and sets the thread count (default 8);
+  it is the only bound for string keys (default 2). `Bag.compute` takes both. Code that passed
+  `prefetch=k` keeps a cap of `k + 1` calls on disk, now also within the byte budget.
+
 ## 0.4.0 — 2026-11-03
 
 A rewrite of the internals around a written contract (CONTRACT.md), plus a run report for

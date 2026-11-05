@@ -45,8 +45,8 @@ Stage = Literal["download", "map", "upload"]
 # What to change when a stage is the limit (BagStats.hint).
 _HINTS: dict[Stage, str] = {
     "download": (
-        "Downloads are the limit: call boost() before the first download if the files are "
-        "small, or raise prefetch."
+        "Downloads are the limit: raise prefetch_bytes (and check the scratch dir has room), so "
+        "more downloads run ahead of the map function."
     ),
     "map": (
         "The map function is the limit: raise batch_size if the model is under-filled, and "
@@ -328,13 +328,15 @@ class Bag:
         self,
         *,
         resume: bool = True,
-        prefetch: int = 2,
+        prefetch: int | None = None,
+        prefetch_bytes: float | None = None,
         dir: str | os.PathLike[str] | None = None,
     ) -> BagStats:
         """Run the plan in-process: list, skip done (``resume``), download, map, write.
 
-        Bounded scratch (via :func:`batched_files`), one ``put_files`` call per batch, and
-        resume by the ``to_bucket(done=...)`` output — safe to kill and re-run.
+        Bounded scratch (via :func:`batched_files`; ``prefetch`` and ``prefetch_bytes`` as
+        there), one ``put_files`` call per batch, and resume by the ``to_bucket(done=...)``
+        output — safe to kill and re-run.
         """
         fn, out, done = self.fn, self.out, self.done
         if fn is None:
@@ -347,7 +349,7 @@ class Bag:
                 "to_bucket(out, done='.md') when each input k writes k + '.md', or "
                 "compute(resume=False) to process every input."
             )
-        _check_batch_settings(self.batch_size, self.max_bytes, prefetch)
+        _check_batch_settings(self.batch_size, self.max_bytes, prefetch, prefetch_bytes)
 
         t0 = time.monotonic()  # BagStats.seconds covers listing and setup() too
         if resume and done is not None:
@@ -355,12 +357,14 @@ class Bag:
         else:
             todo, skipped = self._list_inputs(limit=self.limit), 0
         logger.info(
-            "Bag.compute: %d to do, %d already done; batch_size=%s, max_bytes=%s, prefetch=%d",
+            "Bag.compute: %d to do, %d already done; batch_size=%s, max_bytes=%s, prefetch=%s, "
+            "prefetch_bytes=%s",
             len(todo),
             skipped,
             self.batch_size,
             self.max_bytes,
             prefetch,
+            "auto" if prefetch_bytes is None else f"{prefetch_bytes:.3g}",
         )
         if not todo:  # nothing to do: skip setup() (a model load) and the downloads
             seconds = time.monotonic() - t0
@@ -374,6 +378,7 @@ class Bag:
             n=self.batch_size,
             max_bytes=self.max_bytes,
             prefetch=prefetch,
+            prefetch_bytes=prefetch_bytes,
             dir=dir,
             token=self.token,
         )
