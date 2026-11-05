@@ -38,8 +38,9 @@ is never split. With string keys (no sizes) a call is one batch (`tests/test_dow
 
 Downloads run ahead of the batch you are processing while the bytes on disk and on their way
 stay within `prefetch_bytes` (default 2 GB), capped at half the scratch dir's free space when the
-loop starts. One call always runs when the next batch needs it, so a call larger than the budget
-downloads on its own; `prefetch_bytes=0` downloads one call at a time
+loop starts. One call always downloads ahead of the batch in use, so a batch larger than the
+budget still overlaps with the next (scratch then holds about two calls); `prefetch_bytes=0`
+downloads one call at a time, with no overlap
 (`tests/test_prefetch_bytes.py`). `prefetch`, when set, also caps the calls on disk at
 `prefetch + 1` and sets the number of download threads (default 8). String keys carry no size,
 so only `prefetch` bounds them (default 2). Downloads

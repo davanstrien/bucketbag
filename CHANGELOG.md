@@ -23,8 +23,8 @@
 ### Breaking changes and how to migrate
 
 - **Downloads run ahead by bytes, not by batches: `prefetch_bytes` (default 2 GB).** The files on
-  disk and on their way stay within it, capped at half the scratch dir's free space; a batch
-  larger than the budget still downloads, on its own. On a small machine pass
+  disk and on their way stay within it, capped at half the scratch dir's free space. One call
+  always downloads ahead, so a batch larger than the budget means about two batches on disk. On a small machine pass
   `prefetch_bytes=256e6`, or `0` for one download call at a time. `prefetch` (now default
   `None`) is an optional cap on the download calls ahead and sets the thread count (default 8);
   it is the only bound for string keys (default 2). `Bag.compute` takes both. Code that passed

@@ -1,8 +1,8 @@
 """The download window's byte budget (``prefetch_bytes``, CONTRACT §2).
 
 Sized keys download ahead while the bytes on disk and on their way stay within the budget,
-capped at half the scratch dir's free space. One call always runs when the next batch needs
-it. String keys carry no size, so only the call count applies to them. The conftest fixture
+capped at half the scratch dir's free space. One call always downloads ahead (none with a zero
+budget). String keys carry no size, so only the call count applies to them. The conftest fixture
 gives one file per call unless a test sets the grouping.
 """
 
@@ -44,12 +44,12 @@ def test_the_budget_bounds_the_calls_on_disk(bucket: FakeBucket, tmp_path: Path)
     assert count_bb_dirs(tmp_path) == 0
 
 
-def test_a_call_larger_than_the_budget_downloads_on_its_own(
+def test_a_call_larger_than_the_budget_still_has_one_call_ahead(
     bucket: FakeBucket, tmp_path: Path
 ) -> None:
     files = seed(bucket)
     assert drain_slowly(batched_files(SRC, keys=files, n=1, prefetch_bytes=5, dir=tmp_path)) == 12
-    assert max(bucket.dirs_at_download) == 1
+    assert max(bucket.dirs_at_download) == 2  # the batch in use and the next call
 
 
 def test_a_zero_budget_downloads_one_call_at_a_time(bucket: FakeBucket, tmp_path: Path) -> None:

@@ -365,10 +365,11 @@ def batched_files(
 
     Downloads run ahead of the batch you are processing while the files on disk and on their way
     stay within ``prefetch_bytes`` (default 2 GB, and at most half the scratch dir's free space).
-    One call always runs when the next batch needs it, so a batch larger than the budget
-    downloads on its own. Lower ``prefetch_bytes`` for a small machine; ``0`` downloads one call
-    at a time. NB the default scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so the
-    budget comes out of memory unless you pass ``dir=`` on real disk.
+    One call always downloads ahead of the batch in use, so a batch larger than the budget
+    still overlaps with the next (scratch then holds about two calls). Lower ``prefetch_bytes``
+    for a small machine; ``0`` downloads one call at a time, with no overlap. NB the default
+    scratch dir is ``/dev/shm`` — **RAM tmpfs, not disk** — so the budget comes out of memory
+    unless you pass ``dir=`` on real disk.
 
     ``max_bytes`` needs file sizes, which bucketbag has when it lists for you (or when you pass
     ``BucketFile`` objects as ``keys``, e.g. from ``iter_keys(..., objects=True)``); bare string
@@ -485,7 +486,11 @@ class _CallWindow:
         calls = len(self.ahead) + len(self.held)
         if self.bounds.max_calls is not None and calls >= self.bounds.max_calls + 1:
             return False
-        return self.bounds.budget is None or self.bytes + size <= self.bounds.budget
+        if self.bounds.budget is None:
+            return True
+        if self.bounds.budget > 0 and not self.ahead:
+            return True  # keep one call downloading ahead, so big batches still overlap
+        return self.bytes + size <= self.bounds.budget
 
     def submit(self, *, force: bool = False) -> None:
         """Queue calls while the bounds allow; ``force`` queues one anyway."""
@@ -508,6 +513,7 @@ class _CallWindow:
             self.received += len(call.items)
             self.held.append((call, self.received, size))
             self.ready.extend(call.items)
+            self.submit()  # start the next call while this one's files are in use
         return [self.ready.popleft() for _ in range(count)]
 
     def release(self, taken: list[LoadedItem | None]) -> None:
