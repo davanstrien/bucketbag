@@ -88,7 +88,7 @@ def describe() -> str:
 
 
 def log_once(logger: logging.Logger) -> None:
-    """Log :func:`describe` at INFO, the first time only."""
+    """Log :func:`describe` the first time only: at INFO, or WARNING when xet started first."""
     global _logged
     if _logged:
         return
