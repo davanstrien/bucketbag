@@ -45,8 +45,7 @@ Stage = Literal["download", "map", "upload"]
 # What to change when a stage is the limit (BagStats.hint).
 _HINTS: dict[Stage, str] = {
     "download": (
-        "Downloads are the limit: raise prefetch, so more downloads run ahead of the map "
-        "function."
+        "Downloads are the limit: raise prefetch, so more downloads run ahead of the map function."
     ),
     "map": (
         "The map function is the limit: raise batch_size if the model is under-filled, and "

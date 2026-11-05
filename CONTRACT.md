@@ -116,6 +116,7 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
 - `boost(file_concurrency=k)` replaces bucketbag's import-time values, never values the caller
   exported.
 - `batched_files` logs both values, and who set each, at INFO once per process, before its first
-  download.
+  download. When xet had already started before bucketbag was imported (the process downloaded
+  from the Hub first), xet may keep its own values; the line then says so, at WARNING.
 
 `tests/test_xet_env.py` checks each rule.

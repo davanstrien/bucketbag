@@ -85,6 +85,24 @@ def test_batched_files_logs_the_settings_once_per_process(
     assert CAP in lines[0]
 
 
+def test_importing_after_xet_started_is_flagged() -> None:
+    clean = {k: v for k, v in os.environ.items() if k not in (HP, CAP, OPT_OUT)}
+    script = "import hf_xet, bucketbag\nprint(bucketbag._xet_env.describe())"
+    out = subprocess.run(
+        [sys.executable, "-c", script], env=clean, capture_output=True, text=True, check=True
+    )
+    assert "xet had already started" in out.stdout
+
+
+def test_a_normal_import_is_not_flagged() -> None:
+    clean = {k: v for k, v in os.environ.items() if k not in (HP, CAP, OPT_OUT)}
+    script = "import bucketbag\nprint(bucketbag._xet_env.describe())"
+    out = subprocess.run(
+        [sys.executable, "-c", script], env=clean, capture_output=True, text=True, check=True
+    )
+    assert "xet had already started" not in out.stdout
+
+
 @pytest.mark.internals
 def test_the_log_line_names_who_set_each_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_xet_env, "_set_by_bucketbag", {CAP: "32"})

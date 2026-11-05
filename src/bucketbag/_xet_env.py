@@ -4,7 +4,8 @@ xet reads these environment variables once, when its runtime starts (the first d
 huggingface_hub reads ``HF_XET_HIGH_PERFORMANCE`` when it is imported. So bucketbag sets them
 when it is imported, before either, and only when the caller has not set them. They apply to
 every Hugging Face download in the process, not only bucketbag's, so :func:`log_once` reports
-them the first time bucketbag downloads.
+them the first time bucketbag downloads. If the process downloaded from the Hub before
+importing bucketbag, xet has already read its settings; the log line then says so, as a warning.
 
 Why these values: xet allows 8 concurrent file downloads per process by default, one shared
 limit for every download call. On 0.8-2.5 MB files a limit of 32 doubled throughput (HF Jobs
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 OPT_OUT = "BUCKETBAG_NO_XET_TUNE"
 HIGH_PERFORMANCE = "HF_XET_HIGH_PERFORMANCE"
@@ -28,6 +30,9 @@ XET_FILE_CONCURRENCY_DEFAULT = 8  # xet's own default, for the log line
 
 _set_by_bucketbag: dict[str, str] = {}
 _logged = False
+# huggingface_hub imports hf_xet only when it creates the first xet session, so hf_xet already
+# loaded at bucketbag's import means xet started before these settings were set.
+_xet_started_first = False
 
 
 def opted_out() -> bool:
@@ -37,6 +42,8 @@ def opted_out() -> bool:
 
 def apply_defaults() -> None:
     """Set each default the caller has not set. Called once, at import."""
+    global _xet_started_first
+    _xet_started_first = "hf_xet" in sys.modules
     if opted_out():
         return
     for name, value in DEFAULTS.items():
@@ -65,13 +72,19 @@ def describe() -> str:
         else:
             source = "from your environment"
         parts.append(f"{name}={value if value is not None else '-'} ({source})")
-    return (
+    line = (
         "xet settings for this process: "
         + ", ".join(parts)
         + ". They apply to every Hugging Face download in this process. Export your own values "
         f"before importing bucketbag, or set {OPT_OUT}=1 to keep xet's defaults "
         f"({XET_FILE_CONCURRENCY_DEFAULT} concurrent files)."
     )
+    if _xet_started_first:
+        line += (
+            " WARNING: xet had already started when bucketbag was imported, so xet may still use "
+            "its own values. Import bucketbag before the first Hugging Face download."
+        )
+    return line
 
 
 def log_once(logger: logging.Logger) -> None:
@@ -80,4 +93,4 @@ def log_once(logger: logging.Logger) -> None:
     if _logged:
         return
     _logged = True
-    logger.info(describe())
+    logger.log(logging.WARNING if _xet_started_first else logging.INFO, describe())

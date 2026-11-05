@@ -147,7 +147,9 @@ who set them:
 [bucketbag] xet settings for this process: HF_XET_HIGH_PERFORMANCE=1 (set by bucketbag), HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32 (set by bucketbag). ...
 ```
 
-To change them, export your own values before importing bucketbag, call `boost(file_concurrency=k)`
+xet reads them once, when its first download starts, so **import bucketbag before the first Hugging
+Face download** in the process; otherwise the log line warns that xet may keep its own values. To
+change them, export your own values before importing bucketbag, call `boost(file_concurrency=k)`
 before the first download, or set `BUCKETBAG_NO_XET_TUNE=1` to keep xet's defaults.
 
 ### Decode, not transport
