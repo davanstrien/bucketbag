@@ -329,7 +329,7 @@ class Bag:
         *,
         resume: bool = True,
         prefetch: int | None = None,
-        prefetch_bytes: float = 2e9,
+        prefetch_bytes: float | None = None,
         dir: str | os.PathLike[str] | None = None,
     ) -> BagStats:
         """Run the plan in-process: list, skip done (``resume``), download, map, write.
@@ -358,13 +358,13 @@ class Bag:
             todo, skipped = self._list_inputs(limit=self.limit), 0
         logger.info(
             "Bag.compute: %d to do, %d already done; batch_size=%s, max_bytes=%s, prefetch=%s, "
-            "prefetch_bytes=%.3g",
+            "prefetch_bytes=%s",
             len(todo),
             skipped,
             self.batch_size,
             self.max_bytes,
             prefetch,
-            prefetch_bytes,
+            "auto" if prefetch_bytes is None else f"{prefetch_bytes:.3g}",
         )
         if not todo:  # nothing to do: skip setup() (a model load) and the downloads
             seconds = time.monotonic() - t0

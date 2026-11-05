@@ -1,13 +1,15 @@
 """The download window's byte budget (``prefetch_bytes``, CONTRACT §2).
 
 Sized keys download ahead while the bytes on disk and on their way stay within the budget,
-capped at half the scratch dir's free space. One call always downloads ahead (none with a zero
-budget). String keys carry no size, so only the call count applies to them. The conftest fixture
-gives one file per call unless a test sets the grouping.
+capped at half the scratch dir's free space. The default budget is 2 GB, or three of the
+largest call when that is more; ``prefetch_bytes`` sets a hard budget. One call always
+downloads ahead (none with a zero budget). String keys carry no size, so only the call count
+applies to them. The conftest fixture gives one file per call unless a test sets the grouping.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from pathlib import Path
@@ -73,6 +75,57 @@ def test_the_budget_is_capped_at_half_the_free_space(
     )
     drain_slowly(batched_files(SRC, keys=files, n=1, dir=tmp_path))  # default budget: 2 GB
     assert max(bucket.dirs_at_download) <= 2  # half of 40 bytes holds 2 calls of 10
+
+
+@pytest.mark.internals
+def test_the_default_budget_holds_three_of_the_largest_call(
+    bucket: FakeBucket, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bucketbag._hub._DEFAULT_BUDGET", 15)  # less than three calls of 10
+    files = seed(bucket)
+    assert drain_slowly(batched_files(SRC, keys=files, n=1, dir=tmp_path)) == 12
+    assert max(bucket.dirs_at_download) == 3  # the batch in use and two calls ahead
+
+
+@pytest.mark.internals
+def test_an_explicit_budget_is_a_hard_limit(
+    bucket: FakeBucket, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bucketbag._hub._DEFAULT_BUDGET", 15)
+    files = seed(bucket)
+    batches = batched_files(SRC, keys=files, n=1, prefetch_bytes=15, dir=tmp_path)
+    assert drain_slowly(batches) == 12
+    assert max(bucket.dirs_at_download) == 2  # the batch in use and one call ahead
+
+
+@pytest.mark.internals
+def test_a_raised_default_budget_is_logged(
+    bucket: FakeBucket,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("bucketbag._hub._DEFAULT_BUDGET", 15)
+    files = seed(bucket)
+    with caplog.at_level(logging.INFO, logger="bucketbag"):
+        list(batched_files(SRC, keys=files, n=1, prefetch_bytes=15, dir=tmp_path))
+        assert "Download budget" not in caplog.text  # an explicit budget is not changed
+        list(batched_files(SRC, keys=files, n=1, dir=tmp_path))
+    assert "Download budget" in caplog.text
+    assert "prefetch_bytes=" in caplog.text
+
+
+@pytest.mark.internals
+def test_the_raised_default_budget_is_capped_at_half_the_free_space(
+    bucket: FakeBucket, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bucketbag._hub._DEFAULT_BUDGET", 15)
+    monkeypatch.setattr(
+        bucketbag._hub.shutil, "disk_usage", lambda path: SimpleNamespace(total=40, used=0, free=40)
+    )
+    files = seed(bucket)
+    drain_slowly(batched_files(SRC, keys=files, n=1, dir=tmp_path))
+    assert max(bucket.dirs_at_download) == 2  # half of 40 bytes holds 2 calls of 10
 
 
 @pytest.mark.internals

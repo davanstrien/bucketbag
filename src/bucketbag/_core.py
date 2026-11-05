@@ -154,7 +154,7 @@ def _check_batch_settings(
     n: int | None,
     max_bytes: float | None,
     prefetch: int | None = 0,
-    prefetch_bytes: float = 0,
+    prefetch_bytes: float | None = None,
 ) -> None:
     """Refuse batch settings that cannot work, before anything is listed or downloaded."""
     if n is not None and not _is_count(n):
@@ -163,8 +163,8 @@ def _check_batch_settings(
         raise TypeError(f"max_bytes must be a finite number or None, got {max_bytes!r}.")
     if prefetch is not None and not _is_count(prefetch):
         raise TypeError(f"prefetch must be a whole number or None, got {prefetch!r}.")
-    if not _is_byte_cap(prefetch_bytes):
-        raise TypeError(f"prefetch_bytes must be a finite number, got {prefetch_bytes!r}.")
+    if prefetch_bytes is not None and not _is_byte_cap(prefetch_bytes):
+        raise TypeError(f"prefetch_bytes must be a finite number or None, got {prefetch_bytes!r}.")
     if n is None and max_bytes is None:
         raise ValueError(
             "Batches need a bound: set the file count (n / batch_size), max_bytes, or both. "
@@ -176,7 +176,7 @@ def _check_batch_settings(
         raise ValueError(f"max_bytes must be at least 1, got {max_bytes}.")
     if prefetch is not None and prefetch < 0:
         raise ValueError(f"prefetch must be 0 or more, got {prefetch}.")
-    if prefetch_bytes < 0:
+    if prefetch_bytes is not None and prefetch_bytes < 0:
         raise ValueError(f"prefetch_bytes must be 0 or more, got {prefetch_bytes}.")
 
 
