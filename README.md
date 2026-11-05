@@ -120,20 +120,26 @@ against over-matching listings, including pagination regressions.
 
 ## Performance
 
-Cold + disjoint, replicated (`examples/bench.py`, l4x1, ~0.8 MB jp2; ±10–20%):
+HF Jobs `cpu-upgrade`, 2026-11-05: throughput as a fraction of **one** `HfApi.download_bucket_files`
+call for all of a run's files (an upper bound for bounded scratch; it holds every file on disk).
+Median of paired rounds, each version in its own process, default settings (`n=20, prefetch=2`;
+`n=2` for 45 MB, `n=4` for 0.5 GB):
 
-| | default xet | + `boost()` |
-| --- | --- | --- |
-| `bucketbag` (prefetch 2–4) | ~85–110 img/s | **~200–270 img/s** |
-| raw `download_bucket_files` | ~85–105 | ~210–260 |
-| `HfFileSystem` (32 threads) | ~90–110 | ~110 (bypasses xet) |
-| FUSE mount (same workload) | ~22 | — |
+| files | 0.4.0 | + xet limit 32 | + grouped calls (this version) |
+| --- | --- | --- | --- |
+| 19 KB jpg | 0.26 | 0.36 | **0.90** |
+| 0.8 MB jp2 | 0.30 | 0.52 | **0.90** |
+| 2.5 MB jpg | 0.33 | 0.76 | **0.96** |
+| 45 MB flac | 0.53 | 0.79 | **0.80** |
+| 0.5 GB parquet (CDN warm) | 1.20 | 1.27 | 1.21 |
 
-Competitive with the raw API by design; the win is the interface. The main throughput lever for
-small files is xet's concurrent-file limit (xet's default is 8 per process); bucketbag sets 32 when
-it is imported. A 2026-11-05 HF Jobs benchmark (cpu-upgrade, 5 paired rounds) measured about 2×
-on 0.8–2.5 MB files. On 0.5–0.7 GB files the limit changed nothing and peak memory rose by about
-1 GB.
+Two changes do it. xet allows 8 concurrent file downloads per process by default, shared by every
+call; bucketbag sets 32 at import. And every hub call costs about 0.4 s before data moves (a
+metadata request and a new xet download group), so small batches now share a call of about
+64 MB. Grouped calls alone gain nothing while xet's limit is 8. `prefetch=4` gave 0.91–1.01 on
+small and medium files but 0.97 on 0.5 GB files, at twice the scratch, so the default stays 2;
+raise it when `Bag`'s run report says downloads are the limit. The first batch of tiny files
+waits for its whole call (about 1.5 s for 19 KB files, against 0.5 s before).
 
 ### Process-wide settings
 
