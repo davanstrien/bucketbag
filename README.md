@@ -128,7 +128,7 @@ call for all of a run's files (an upper bound for bounded scratch; it holds ever
 Median of paired rounds, each version in its own process, default settings (`n=20, prefetch=2`;
 `n=2` for 45 MB, `n=4` for 0.5 GB):
 
-| files | 0.4.0 | + xet limit 32 | + grouped calls (this version) |
+| files | 0.4.0 | + xet limit 32 | + grouped calls |
 | --- | --- | --- | --- |
 | 19 KB jpg | 0.26 | 0.36 | **0.90** |
 | 0.8 MB jp2 | 0.30 | 0.52 | **0.90** |
@@ -139,10 +139,27 @@ Median of paired rounds, each version in its own process, default settings (`n=2
 Two changes do it. xet allows 8 concurrent file downloads per process by default, shared by every
 call; bucketbag sets 32 at import. And every hub call costs about 0.4 s before data moves (a
 metadata request and a new xet download group), so small batches now share a call of about
-64 MB. Grouped calls alone gain nothing while xet's limit is 8. `prefetch=4` gave 0.91–1.01 on
-small and medium files but 0.97 on 0.5 GB files, at twice the scratch, so the default stays 2;
-raise it when `Bag`'s run report says downloads are the limit. The first batch of tiny files
+64 MB. Grouped calls alone gain nothing while xet's limit is 8. The first batch of tiny files
 waits for its whole call (about 1.5 s for 19 KB files, against 0.5 s before).
+
+This version bounds the downloads ahead by bytes, not by a count of batches, with up to 8
+download threads. Against grouped calls with `prefetch=2`, in the same rounds:
+
+| files | `prefetch=2` | byte budget (default) |
+| --- | --- | --- |
+| 19 KB jpg | 0.95 | **1.00** |
+| 0.8 MB jp2 | 0.94 | 0.95 |
+| 2.5 MB jpg | 0.86 | **1.04** |
+| 45 MB flac | 0.70 | **0.80** |
+| 220 MB parquet | 1.00 | 1.07 |
+| 0.5 GB parquet, 4 per batch (two runs) | 1.24, 0.89 | 1.08, 0.91 |
+
+A flat 2 GB budget gave 0.79 and 0.96 on the 0.5 GB rows: it kept one 2.2 GB batch ahead, where
+0.4.0 kept two. The default therefore also holds three of the largest call. With batches that
+large the first batch arrives later (about 8 s against 5 s), since three calls share the
+bandwidth; pass `prefetch=2` if that matters. A hard budget of `prefetch_bytes=256e6` gave
+0.78–1.01 on the same sizes. Raise the budget when `Bag`'s run report says downloads are the
+limit.
 
 ### Process-wide settings
 
