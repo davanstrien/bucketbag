@@ -29,7 +29,8 @@ depends on file size and on what the loop needs.
 Throughput as a fraction of one `HfApi.download_bucket_files` call for all of a run's files, in
 the same rounds (HF Jobs `cpu-upgrade`, 2026-11-05). The threaded mount reads with 32 threads (8
 for 45 MB files, 4 for 220 MB). bucketbag ran with grouped calls and `prefetch=2`; the byte budget
-was level or faster on these sizes.
+was level or faster on the five sizes in the table. The reference is one call in the same round,
+so values above 1 are round-to-round variation: bucketbag uses the same transport.
 
 **bucketbag fits when:**
 
@@ -41,7 +42,8 @@ was level or faster on these sizes.
 
 **The mount fits when:**
 
-- Files are tens of MB or larger and you read them with a few threads.
+- Files are tens of MB or larger and you read them with a few threads. From about 200 MB the
+  two are level.
 - A tool wants file paths and opens the files itself, or reads only part of each file.
 - You want no code changes: `hf jobs run -v hf://buckets/ns/bucket:/data ...` and read `/data`.
 
