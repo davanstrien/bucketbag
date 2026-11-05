@@ -106,3 +106,16 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   them.
 - `batched_files` warns before the first download when the largest `prefetch + 1` batches
   would not fit in the scratch dir's free space. String keys carry no size, so they never warn.
+
+## 7. Process-wide xet settings
+
+- Importing bucketbag sets `HF_XET_HIGH_PERFORMANCE=1` and
+  `HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32`, each only when the caller has not set it.
+  `BUCKETBAG_NO_XET_TUNE=1` sets neither. Both apply to every Hugging Face download in the
+  process.
+- `boost(file_concurrency=k)` replaces bucketbag's import-time values, never values the caller
+  exported.
+- `batched_files` logs both values, and who set each, at INFO once per process, before its first
+  download.
+
+`tests/test_xet_env.py` checks each rule.

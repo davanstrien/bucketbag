@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Importing bucketbag sets xet's concurrent-file limit to 32** (`HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`;
+  xet's default is 8 per process), as it already set `HF_XET_HIGH_PERFORMANCE=1`. About 2× on
+  0.8–2.5 MB files in an HF Jobs benchmark; no change on 0.5–0.7 GB files. The setting applies
+  to every Hugging Face download in the process, so the first `batched_files` call logs it.
+  Values you export win; `BUCKETBAG_NO_XET_TUNE=1` keeps xet's defaults.
+- **`boost()` can replace bucketbag's import-time values** (before, it used `setdefault`, so it
+  could not change a value bucketbag had set). It still never replaces a value you exported.
+
 ## 0.4.0 — 2026-11-03
 
 A rewrite of the internals around a written contract (CONTRACT.md), plus a run report for

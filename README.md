@@ -7,7 +7,7 @@ wants as an interface:
 - **Bounded scratch** — download a batch, process, delete, repeat. Peak footprint ≈ `(prefetch + 1) × max_bytes`, never the corpus.
 - **Resume** — re-runs skip work already done (long [HF Jobs](https://huggingface.co/docs/hub/en/jobs) can stop and restart).
 - **Zero cleanup code** — temp files removed as the loop advances, even on exceptions.
-- **Throughput knobs** — prefetch overlaps download with compute; `boost()` raises xet's small-file concurrency.
+- **Throughput defaults** — prefetch overlaps download with compute; importing bucketbag raises xet's concurrent-file limit to 32 (see [Process-wide settings](#process-wide-settings)).
 
 Mounting a bucket in a Job (`hf jobs run -v hf://buckets/...`) is the simplest way to use one; bucketbag explores the
 **explicit API path** for batch workloads where footprint, resume, and concurrency should be under
@@ -105,7 +105,7 @@ bag.compute()  # once more: files may have landed during the last sleep
 | `iter_keys(bucket, *, prefix, include, exclude, start_after, limit, token)` | list + glob-filter + sort keys (no download) |
 | `put_files(pairs, out_bucket)` / `put_bytes` / `put_text` | write raw objects; `put_files` batches many per call |
 | `completed_keys(out_bucket, *, prefix, column="__source_key")` | done-set from parquet outputs |
-| `boost(*, file_concurrency=32)` | raise xet download concurrency (~2.5× on small files) |
+| `boost(*, file_concurrency=32)` | change xet's concurrent-file limit (bucketbag sets 32 at import) |
 | `LoadedItem` | `.key` `.path` + lazy `.bytes` `.image` `.text()` `.json()` |
 | `Bag.from_bucket(...).map_batches(fn).to_bucket(out, done=".md")` + `.take(n)` / `.compute()` | the loop as a lazy plan |
 
@@ -128,9 +128,27 @@ Cold + disjoint, replicated (`examples/bench.py`, l4x1, ~0.8 MB jp2; ±10–20%)
 | `HfFileSystem` (32 threads) | ~90–110 | ~110 (bypasses xet) |
 | FUSE mount (same workload) | ~22 | — |
 
-Competitive with the raw API by design; the win is the interface. The one real throughput lever is
-xet's concurrent-file cap (default 8) — `boost()` raises it, ~2.5× on small files. Skip it for
-large files (over-subscription).
+Competitive with the raw API by design; the win is the interface. The main throughput lever for
+small files is xet's concurrent-file limit (xet's default is 8 per process); bucketbag sets 32 when
+it is imported. A 2026-11-05 HF Jobs benchmark (cpu-upgrade, 5 paired rounds) measured about 2×
+on 0.8–2.5 MB files. On 0.5–0.7 GB files the limit changed nothing and peak memory rose by about
+1 GB.
+
+### Process-wide settings
+
+Importing bucketbag sets two xet environment variables, unless you have set them yourself:
+`HF_XET_HIGH_PERFORMANCE=1` and `HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32`. They apply to
+**every Hugging Face download in the process**, not only bucketbag's: a model download in the same
+script also runs up to 32 files at once. xet still caps its download buffer memory (half of usable
+memory in high-performance mode, cgroup-aware). The first `batched_files` call logs the values and
+who set them:
+
+```text
+[bucketbag] xet settings for this process: HF_XET_HIGH_PERFORMANCE=1 (set by bucketbag), HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS=32 (set by bucketbag). ...
+```
+
+To change them, export your own values before importing bucketbag, call `boost(file_concurrency=k)`
+before the first download, or set `BUCKETBAG_NO_XET_TUNE=1` to keep xet's defaults.
 
 ### Decode, not transport
 

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Literal, overload
 
 from huggingface_hub import BucketFile, HfApi
 
+from . import _xet_env
 from ._core import BucketRef, _check_batch_settings, _glob_prefix, _glob_to_re, _keeps, _pack
 
 if TYPE_CHECKING:
@@ -34,25 +35,20 @@ _BUCKET_SCHEME = "hf://buckets/"
 
 
 def boost(*, file_concurrency: int = 32, high_performance: bool = True) -> None:
-    """Raise xet download concurrency for **many-small-files** workloads (e.g. page images).
+    """Set xet's concurrent file downloads for this process (and high-performance mode).
 
-    Sets ``HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`` — xet's per-process concurrent-file
-    download cap (default 8) — higher. On ~1 MB files this roughly **2.5x'd** throughput in our
-    l4x1 benchmark and made the HfApi path beat both raw download and HfFileSystem. Use a **low**
-    value (or don't call this) for **large** files: each file's chunk fetches are managed by
-    xet's own connection/concurrency machinery, so many large files in flight at once means that
-    many files buffering concurrently — over-subscription and a memory/disk blowup.
+    bucketbag already sets 32 concurrent files and high-performance mode when it is imported
+    (unless you exported your own values or set ``BUCKETBAG_NO_XET_TUNE=1``). Call this to
+    pick another file count. It replaces bucketbag's import-time defaults, never a value you
+    exported yourself.
 
-    Call this **before your first** :func:`batched_files`/download: xet reads these env vars when
-    its runtime first initializes (on the first download), so a call beforehand is picked up. It
-    does not override env vars you have already exported.
-
-    Note: the file-concurrency var is not documented in ``huggingface_hub`` (best-effort — an
-    unknown var is ignored, never an error); ``HF_XET_HIGH_PERFORMANCE`` is documented.
+    Call it **before the first download** in the process: xet reads these variables when its
+    runtime starts. ``HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS`` is xet's per-process limit
+    (xet's default is 8), shared by every download call.
     """
     if high_performance:
-        os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
-    os.environ.setdefault("HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS", str(file_concurrency))
+        _xet_env.set_value(_xet_env.HIGH_PERFORMANCE, "1")
+    _xet_env.set_value(_xet_env.FILE_CONCURRENCY, str(file_concurrency))
 
 
 def _resolve_dir(dir: str | os.PathLike[str] | None) -> Path:
@@ -374,6 +370,7 @@ def batched_files(
     if not remotes:
         return
 
+    _xet_env.log_once(logger)
     api = HfApi(token=token)
     base_dir = _resolve_dir(dir)
     if any(isinstance(r, BucketFile) for r in remotes):  # only sized keys can warn
