@@ -32,14 +32,16 @@ the loop body raises, when the caller stops early, and for batches downloaded ah
 (`prefetch`). `tests/test_batched_files.py` covers each `prefetch` level.
 
 Batches are downloaded in hub calls of whole batches: consecutive batches share a call until it
-holds about `min(64 MB, prefetch_bytes / 4)` or 256 files, and a batch at or above that size is a
+holds about `min(64 MB, budget / 4)` or 256 files, and a batch at or above that size is a
 call of its own. A batch
 is never split. With string keys (no sizes) a call is one batch (`tests/test_download_calls.py`).
 
 Downloads run ahead of the batch you are processing while the bytes on disk and on their way
-stay within `prefetch_bytes` (default 2 GB), capped at half the scratch dir's free space when the
-loop starts. One call always downloads ahead of the batch in use, so a batch larger than the
-budget still overlaps with the next (scratch then holds about two calls); `prefetch_bytes=0`
+stay within a byte budget, capped at half the scratch dir's free space when the loop starts.
+The default budget is 2 GB, or three of the largest download call when that is more (the call
+in use and two ahead), and the first call logs a raised budget; `prefetch_bytes` sets a hard
+budget instead. One call always downloads ahead of the batch in use, so a batch larger than a
+hard budget still overlaps with the next (scratch then holds about two calls); `prefetch_bytes=0`
 downloads one call at a time, with no overlap
 (`tests/test_prefetch_bytes.py`). `prefetch`, when set, also caps the calls on disk at
 `prefetch + 1` and sets the number of download threads (default 8). String keys carry no size,
@@ -94,7 +96,7 @@ raises (`EntryNotFoundError`) at least when the gone file comes first in the bat
   string keys carry no size.
 - Settings that cannot work raise before anything is listed. `n` (`batch_size` in `Bag`) must
   be a whole number and `prefetch` a whole number or `None`; `max_bytes` and `prefetch_bytes`
-  may be any finite number, such as `4e9`. A bool, nan or inf raises `TypeError`. At least one
+  may be `None` or any finite number, such as `4e9`. A bool, nan or inf raises `TypeError`. At least one
   of `n` and `max_bytes` must be set, each at least 1, and `prefetch` and `prefetch_bytes` must
   be 0 or more (`ValueError`). `Bag.map_batches` checks its bounds when
   the plan is built.
